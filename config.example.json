@@ -1,0 +1,16 @@
+{
+  "grafana": {
+    "url": "http://your-grafana-url:3000",
+    "api_key": "your-service-account-token",
+    "username": "your-grafana-username",
+    "password": "your-grafana-password"
+  },
+  "smtp": {
+    "host": "",
+    "port": 587,
+    "username": "",
+    "password": "",
+    "force_smtp": false
+  },
+  "jobs": []
+}

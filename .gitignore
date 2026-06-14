@@ -1,0 +1,23 @@
+# Credentials and local config
+config.json
+contacts.json
+
+# Generated output
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+app/pages/
