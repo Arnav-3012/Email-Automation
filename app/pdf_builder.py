@@ -8,7 +8,6 @@ from typing import Any
 
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
@@ -30,10 +29,15 @@ from reportlab.platypus import (
 # ---------------------------------------------------------------------------
 
 _PAGE_W, _PAGE_H = A4
-_MARGIN = 2.0 * cm
-_CONTENT_W = _PAGE_W - 2 * _MARGIN   # ~481 pt
-_FOOTER_Y = 0.6 * cm                  # y position of footer text baseline
-_BOTTOM_MARGIN = _MARGIN + 1.0 * cm   # bottom margin (room for footer)
+_MARGIN = 1.5 * cm                        # ~42 pt — tighter for more image area
+_CONTENT_W = _PAGE_W - 2 * _MARGIN        # ~510 pt
+_FOOTER_Y = 0.45 * cm
+_BOTTOM_MARGIN = _MARGIN + 0.75 * cm      # ~63 pt — room for footer line
+
+# Height available to the image on a full overview page.
+# Reserves 16 pt for a single caption line above the image.
+_OVERVIEW_CAPTION_H = 16
+_OVERVIEW_IMG_H = _PAGE_H - _MARGIN - _BOTTOM_MARGIN - _OVERVIEW_CAPTION_H
 
 
 # ---------------------------------------------------------------------------
@@ -43,14 +47,14 @@ _BOTTOM_MARGIN = _MARGIN + 1.0 * cm   # bottom margin (room for footer)
 def build(
     job_config: dict[str, Any],
     panels_data: list[dict[str, Any]],
+    dashboard_screenshots: dict[str, bytes | None] | None = None,
     output_dir: str = "output/",
 ) -> str:
-    """Build a PDF report from the job config and panel screenshots.
+    """Build a PDF from job config and panel screenshots.
 
-    panels_data is a list of dicts with keys: dashboard_uid, dashboard_title,
-    folder_path, panel_id, panel_title, screenshot (PNG bytes).
-    Routes to single-page canvas builder when all panels share one dashboard,
-    otherwise builds a full multi-page PLATYPUS document.
+    panels_data items carry keys: dashboard_uid, dashboard_title, folder_path,
+    panel_id, panel_title, screenshot (list[bytes]).
+    dashboard_screenshots maps uid → full-page PNG bytes (or None).
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -58,12 +62,14 @@ def build(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     out_path = str(Path(output_dir) / _make_filename(job_config.get("name", "report"), today))
 
+    shots = dashboard_screenshots or {}
     unique_dashboards = len(set(p["dashboard_uid"] for p in panels_data))
+    has_overview = any(v for v in shots.values())
 
-    if unique_dashboards == 1:
+    if unique_dashboards == 1 and not has_overview:
         _build_single_page(out_path, job_config, panels_data, today, timestamp)
     else:
-        _build_multi_page(out_path, job_config, panels_data, today, timestamp)
+        _build_multi_page(out_path, job_config, panels_data, today, timestamp, shots)
 
     return out_path
 
@@ -78,13 +84,13 @@ def _make_filename(job_name: str, today: date) -> str:
 
 
 def _resolve_title(job_config: dict[str, Any], today: date) -> str:
-    """Replace the {date} placeholder in pdf_title with today's date string."""
+    """Replace {date} in pdf_title with today's formatted date."""
     tmpl = job_config.get("pdf_title") or job_config.get("name", "Report")
     return tmpl.replace("{date}", today.strftime("%Y-%m-%d"))
 
 
 # ---------------------------------------------------------------------------
-# Single-page builder — canvas-based for guaranteed single-page output
+# Single-page builder — canvas-based, 1 dashboard, no overview shot
 # ---------------------------------------------------------------------------
 
 def _build_single_page(
@@ -94,76 +100,63 @@ def _build_single_page(
     today: date,
     timestamp: str,
 ) -> None:
-    """Render all panels on one A4 page, scaling images equally to fit."""
+    """Render all panels on one A4 page, images scaled equally to fill height."""
     c = pdfcanvas.Canvas(out_path, pagesize=A4)
 
-    # Compact header
     y = _PAGE_H - _MARGIN
 
-    c.setFont("Helvetica-Bold", 20)
+    c.setFont("Helvetica-Bold", 15)
     c.setFillColor(colors.black)
-    c.drawString(_MARGIN, y - 22, _resolve_title(job_config, today))
-    y -= 28
+    c.drawString(_MARGIN, y - 17, _resolve_title(job_config, today))
+    y -= 23
 
-    c.setFont("Helvetica", 9)
-    c.setFillColor(colors.black)
-    meta = f"{job_config.get('name', '')}  ·  Generated: {timestamp}"
-    c.drawString(_MARGIN, y - 11, meta)
-    y -= 17
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(colors.HexColor("#555555"))
+    c.drawString(_MARGIN, y - 9, f"{job_config.get('name', '')}  ·  Generated: {timestamp}")
+    y -= 14
 
-    # Thin rule below header
-    c.setStrokeColor(colors.black)
+    c.setStrokeColor(colors.HexColor("#cccccc"))
     c.setLineWidth(0.5)
-    c.line(_MARGIN, y - 4, _PAGE_W - _MARGIN, y - 4)
-    y -= 12
+    c.line(_MARGIN, y - 3, _PAGE_W - _MARGIN, y - 3)
+    y -= 9
 
-    # Calculate image pool: remaining height minus per-panel title rows and gaps
     N = len(panels_data)
-    panel_title_h = 13   # pt per panel title line
-    gap_h = 5            # pt gap below each panel image
-    total_overhead = (panel_title_h + gap_h) * N
+    title_h = 10
+    gap_h = 4
     available_h = y - _BOTTOM_MARGIN
-    per_img_h = max((available_h - total_overhead) / N, 0) if N > 0 else 0
+    per_img_h = max((available_h - (title_h + gap_h) * N) / N, 0) if N else 0
 
-    # Draw each panel — screenshot is list[bytes]; use first chunk for single-page layout
     for panel in panels_data:
-        panel_title = panel.get("panel_title", "Panel")
-        screenshot = panel.get("screenshot") or []
-        png_bytes = screenshot[0] if screenshot else b""
-
-        c.setFont("Helvetica-Bold", 8)
+        png_bytes = (panel.get("screenshot") or [b""])[0]
+        c.setFont("Helvetica-Bold", 6.5)
         c.setFillColor(colors.black)
-        c.drawString(_MARGIN, y - panel_title_h + 3, panel_title)
-        y -= panel_title_h
+        c.drawString(_MARGIN, y - title_h + 2, panel.get("panel_title", "Panel"))
+        y -= title_h
 
         if png_bytes and per_img_h > 0:
             try:
                 pil_img = PILImage.open(io.BytesIO(png_bytes))
                 pw, ph = pil_img.size
                 scale = min(_CONTENT_W / pw, per_img_h / ph)
-                img_w = pw * scale
-                img_h = ph * scale
                 c.drawImage(
                     ImageReader(io.BytesIO(png_bytes)),
-                    _MARGIN, y - img_h,
-                    width=img_w, height=img_h,
+                    _MARGIN, y - ph * scale,
+                    width=pw * scale, height=ph * scale,
                 )
             except Exception:
                 pass
 
         y -= per_img_h + gap_h
 
-    # Footer
-    c.setFont("Helvetica", 7)
-    c.setFillColor(colors.black)
+    c.setFont("Helvetica", 6.5)
+    c.setFillColor(colors.HexColor("#888888"))
     c.drawString(_MARGIN, _FOOTER_Y, f"Generated by Grafana Reporter · {timestamp}")
     c.drawRightString(_PAGE_W - _MARGIN, _FOOTER_Y, "Page 1")
-
     c.save()
 
 
 # ---------------------------------------------------------------------------
-# Multi-page builder — PLATYPUS, black and white
+# Multi-page builder — PLATYPUS
 # ---------------------------------------------------------------------------
 
 def _build_multi_page(
@@ -172,8 +165,9 @@ def _build_multi_page(
     panels_data: list[dict[str, Any]],
     today: date,
     timestamp: str,
+    dashboard_screenshots: dict[str, bytes | None] | None = None,
 ) -> None:
-    """Render a full multi-page report with cover page and per-dashboard sections."""
+    """Render a multi-page report. Each dashboard opens with a full-page overview."""
     doc = SimpleDocTemplate(
         out_path,
         pagesize=A4,
@@ -186,9 +180,7 @@ def _build_multi_page(
     )
 
     styles = _make_styles()
-    story: list = []
-    story.extend(_cover_page(job_config, panels_data, styles, today, timestamp))
-    story.extend(_content_pages(panels_data, styles))
+    story = _content_pages(panels_data, styles, dashboard_screenshots or {})
 
     doc.build(
         story,
@@ -198,70 +190,48 @@ def _build_multi_page(
 
 
 # ---------------------------------------------------------------------------
-# Paragraph styles — black and white
+# Paragraph styles
 # ---------------------------------------------------------------------------
 
 def _make_styles() -> dict[str, ParagraphStyle]:
     """Build and return all named ParagraphStyles used in the report."""
     base = getSampleStyleSheet()
     return {
-        "report_title": ParagraphStyle(
-            "rpt_report_title",
+        "overview_caption": ParagraphStyle(
+            "rpt_overview_caption",
             parent=base["Normal"],
-            fontSize=22,
-            leading=28,
+            fontSize=8.5,
             fontName="Helvetica-Bold",
-            textColor=colors.black,
-            alignment=TA_LEFT,
-            spaceAfter=14,
-        ),
-        "cover_meta": ParagraphStyle(
-            "rpt_cover_meta",
-            parent=base["Normal"],
-            fontSize=10,
-            textColor=colors.black,
-            spaceAfter=4,
-        ),
-        "cover_label": ParagraphStyle(
-            "rpt_cover_label",
-            parent=base["Normal"],
-            fontSize=8,
-            fontName="Helvetica-Bold",
-            textColor=colors.black,
-            spaceBefore=16,
-            spaceAfter=4,
-        ),
-        "cover_item": ParagraphStyle(
-            "rpt_cover_item",
-            parent=base["Normal"],
-            fontSize=10,
-            textColor=colors.black,
-            leftIndent=12,
+            textColor=colors.HexColor("#222222"),
+            leading=10,
             spaceAfter=4,
         ),
         "section_title": ParagraphStyle(
             "rpt_section_title",
             parent=base["Normal"],
-            fontSize=13,
+            fontSize=10,
             fontName="Helvetica-Bold",
             textColor=colors.black,
+            leading=12,
         ),
         "folder_path": ParagraphStyle(
             "rpt_folder_path",
             parent=base["Normal"],
-            fontSize=8,
-            textColor=colors.black,
-            spaceBefore=3,
-            spaceAfter=6,
+            fontSize=7,
+            textColor=colors.HexColor("#666666"),
+            leading=9,
+            spaceBefore=2,
+            spaceAfter=3,
         ),
         "panel_title": ParagraphStyle(
             "rpt_panel_title",
             parent=base["Normal"],
-            fontSize=11,
+            fontSize=8.5,
             fontName="Helvetica-Bold",
             textColor=colors.black,
-            spaceBefore=10,
-            spaceAfter=4,
+            leading=10,
+            spaceBefore=7,
+            spaceAfter=2,
         ),
     }
 
@@ -274,8 +244,8 @@ def _make_footer(timestamp: str):
     """Return an onPage callback that draws the footer on every page."""
     def _footer(canvas, doc):
         canvas.saveState()
-        canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.black)
+        canvas.setFont("Helvetica", 6.5)
+        canvas.setFillColor(colors.HexColor("#888888"))
         canvas.drawString(
             _MARGIN, _FOOTER_Y,
             f"Generated by Grafana Reporter · {timestamp}",
@@ -286,52 +256,17 @@ def _make_footer(timestamp: str):
 
 
 # ---------------------------------------------------------------------------
-# Cover page
-# ---------------------------------------------------------------------------
-
-def _cover_page(
-    job_config: dict[str, Any],
-    panels_data: list[dict[str, Any]],
-    styles: dict[str, ParagraphStyle],
-    today: date,
-    timestamp: str,
-) -> list:
-    """Build the cover page story elements, ending with a PageBreak."""
-    story: list = []
-
-    story.append(Spacer(1, 2.5 * cm))
-    story.append(Paragraph(_resolve_title(job_config, today), styles["report_title"]))
-    story.append(Spacer(1, 0.5 * cm))
-    story.append(Paragraph(f"Job: {job_config.get('name', '')}", styles["cover_meta"]))
-    story.append(Paragraph(f"Generated: {timestamp}", styles["cover_meta"]))
-    story.append(Spacer(1, 1.0 * cm))
-    story.append(Paragraph("DASHBOARDS INCLUDED", styles["cover_label"]))
-
-    seen: set[str] = set()
-    for panel in panels_data:
-        uid = panel.get("dashboard_uid", "")
-        if uid in seen:
-            continue
-        seen.add(uid)
-        dtitle = panel.get("dashboard_title", uid)
-        fpath = panel.get("folder_path", "")
-        suffix = f"  ({fpath})" if fpath else ""
-        story.append(Paragraph(f"•  {dtitle}{suffix}", styles["cover_item"]))
-
-    story.append(PageBreak())
-    return story
-
-
-# ---------------------------------------------------------------------------
 # Content pages
 # ---------------------------------------------------------------------------
 
 def _content_pages(
     panels_data: list[dict[str, Any]],
     styles: dict[str, ParagraphStyle],
+    dashboard_screenshots: dict[str, bytes | None] | None = None,
 ) -> list:
-    """Build all dashboard section headers and panel blocks after the cover page."""
+    """Build the full story: for each dashboard, overview page then panel detail."""
     story: list = []
+    shots = dashboard_screenshots or {}
 
     groups: dict[str, dict[str, Any]] = OrderedDict()
     for panel in panels_data:
@@ -344,18 +279,45 @@ def _content_pages(
             }
         groups[uid]["panels"].append(panel)
 
-    first = True
+    first_db = True
     for uid, group in groups.items():
-        if not first:
+        if not first_db:
             story.append(PageBreak())
-        first = False
+        first_db = False
 
+        # Full-page overview
+        full_png = shots.get(uid)
+        if full_png:
+            story.extend(_overview_page(full_png, group["title"], group["folder_path"], styles))
+
+        # Panel detail section
         story.extend(_section_header(group["title"], group["folder_path"], styles))
-
         for panel in group["panels"]:
             story.append(_panel_block(panel, styles))
 
     return story
+
+
+def _overview_page(
+    full_png: bytes,
+    title: str,
+    folder_path: str,
+    styles: dict[str, ParagraphStyle],
+) -> list:
+    """Single-line caption then the full dashboard image filling the page."""
+    img_obj = _make_overview_image(full_png)
+    if img_obj is None:
+        return []
+
+    caption_parts = [title]
+    if folder_path:
+        caption_parts.append(folder_path)
+
+    return [
+        Paragraph("  ·  ".join(caption_parts), styles["overview_caption"]),
+        img_obj,
+        PageBreak(),
+    ]
 
 
 def _section_header(
@@ -363,15 +325,15 @@ def _section_header(
     folder_path: str,
     styles: dict[str, ParagraphStyle],
 ) -> list:
-    """Return a bold black section header with a thin rule underneath."""
+    """Bold section title with a hairline rule underneath."""
     header = Table(
         [[Paragraph(title, styles["section_title"])]],
         colWidths=[_CONTENT_W],
     )
     header.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, -1), 0.75, colors.black),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#aaaaaa")),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
@@ -379,7 +341,7 @@ def _section_header(
     items: list = [header]
     if folder_path:
         items.append(Paragraph(folder_path, styles["folder_path"]))
-    items.append(Spacer(1, 0.2 * cm))
+    items.append(Spacer(1, 0.1 * cm))
     return items
 
 
@@ -387,18 +349,35 @@ def _panel_block(
     panel: dict[str, Any],
     styles: dict[str, ParagraphStyle],
 ) -> KeepTogether:
-    """Return a KeepTogether block containing the panel title and all screenshot chunks."""
+    """Panel title followed by all screenshot chunks, kept together."""
     elements: list = [Paragraph(panel.get("panel_title", "Panel"), styles["panel_title"])]
     for png_bytes in (panel.get("screenshot") or []):
         img_obj = _make_image(png_bytes)
         elements.append(img_obj)
-        elements.append(Spacer(1, 6))
-    elements.append(Spacer(1, 0.4 * cm))
+        elements.append(Spacer(1, 3))
+    elements.append(Spacer(1, 0.2 * cm))
     return KeepTogether(elements)
 
 
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+def _make_overview_image(png_bytes: bytes) -> Image | None:
+    """Scale PNG to fill the overview page (constrained to content width × overview height)."""
+    if not png_bytes:
+        return None
+    try:
+        pil_img = PILImage.open(io.BytesIO(png_bytes))
+        pw, ph = pil_img.size
+        scale = min(_CONTENT_W / pw, _OVERVIEW_IMG_H / ph)
+        return Image(io.BytesIO(png_bytes), width=pw * scale, height=ph * scale)
+    except Exception:
+        return None
+
+
 def _make_image(png_bytes: bytes) -> Image | Spacer:
-    """Convert PNG bytes to a full-content-width reportlab Image, preserving aspect ratio."""
+    """Scale PNG to full content width, preserving aspect ratio."""
     if not png_bytes:
         return Spacer(1, 0.1 * cm)
     try:

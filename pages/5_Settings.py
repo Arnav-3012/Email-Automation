@@ -63,7 +63,24 @@ st.header("SMTP Settings")
 st.info("Only used on Mac for testing. Ignored on Windows — Outlook is used instead.")
 
 smtp_host = st.text_input("SMTP Host", value=smtp["host"])
-smtp_port = st.number_input("Port", value=smtp["port"], min_value=1, max_value=65535, step=1)
+
+smtp_port_col, smtp_tls_col = st.columns(2)
+with smtp_port_col:
+    smtp_port = st.number_input("Port", value=smtp["port"], min_value=1, max_value=65535, step=1)
+with smtp_tls_col:
+    tls_options = ["starttls", "ssl", "none"]
+    tls_idx = tls_options.index(smtp["tls_mode"]) if smtp["tls_mode"] in tls_options else 0
+    smtp_tls_mode = st.selectbox(
+        "TLS Mode",
+        options=tls_options,
+        index=tls_idx,
+        format_func=lambda x: {
+            "starttls": "STARTTLS (works with any port, requires auth)",
+            "ssl": "SSL/TLS (works with any port, requires auth)",
+            "none": "None (open relay, no auth required)",
+        }[x],
+    )
+
 smtp_username = st.text_input("SMTP Username", value=smtp["username"])
 smtp_password = st.text_input("SMTP Password", value=smtp["password"], type="password")
 
@@ -73,5 +90,6 @@ if st.button("Save SMTP Settings"):
         port=int(smtp_port),
         username=smtp_username,
         password=smtp_password,
+        tls_mode=smtp_tls_mode,
     )
     st.success("Saved.")

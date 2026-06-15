@@ -46,6 +46,7 @@ def run_job(job_id: str) -> None:
     attachments: list[str] = []
     panels_data: list[dict[str, Any]] = []       # chart panels → PDF
     table_panels_data: list[dict[str, Any]] = [] # table panels → CSV
+    dashboard_screenshots: dict[str, bytes | None] = {}  # uid → full-page PNG
 
     try:
         for dashboard in job.get("dashboards", []):
@@ -63,12 +64,22 @@ def run_job(job_id: str) -> None:
             chart_panels = [p for p in selected if p.get("type") not in TABLE_TYPES]
             table_panels = [p for p in selected if p.get("type") in TABLE_TYPES]
 
+            # Full dashboard overview screenshot
+            try:
+                dashboard_screenshots[uid] = screenshot_taker.capture_full_dashboard(
+                    uid, grafana_settings
+                )
+                _log(f"Full dashboard captured: {dashboard.get('title', uid)}")
+            except Exception as e:
+                _log(f"Full dashboard capture failed: {e}")
+                dashboard_screenshots[uid] = None
+
             # Screenshots for chart panels
             if chart_panels:
                 chart_ids = [p["id"] for p in chart_panels]
                 screenshots = screenshot_taker.capture_panels(uid, chart_ids, grafana_settings)
                 for panel in chart_panels:
-                    custom_name = panel_names.get(str(panel["id"]), "")
+                    custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
                     panels_data.append({
                         "dashboard_uid": uid,
                         "dashboard_title": dashboard_title,
@@ -78,12 +89,27 @@ def run_job(job_id: str) -> None:
                         "screenshot": screenshots.get(panel["id"], screenshot_taker._unavailable_png()),
                     })
 
-            # Data fetch for table panels
+            # Screenshots for table panels — added to PDF alongside chart panels
+            if table_panels:
+                table_ids = [p["id"] for p in table_panels]
+                table_screenshots = screenshot_taker.capture_panels(uid, table_ids, grafana_settings)
+                for panel in table_panels:
+                    custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
+                    panels_data.append({
+                        "dashboard_uid": uid,
+                        "dashboard_title": dashboard_title,
+                        "folder_path": dashboard.get("folder_path", ""),
+                        "panel_id": panel["id"],
+                        "panel_title": custom_name if custom_name else panel.get("title", f"Panel {panel['id']}"),
+                        "screenshot": table_screenshots.get(panel["id"], screenshot_taker._unavailable_png()),
+                    })
+
+            # Data fetch for table panels → CSV
             for panel in table_panels:
                 try:
                     df = data_fetcher.fetch_panel_data(panel, grafana_client)
                     if df is not None and not df.empty:
-                        custom_name = panel_names.get(str(panel["id"]), "")
+                        custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
                         table_panels_data.append({
                             "panel": {
                                 **panel,
@@ -95,17 +121,16 @@ def run_job(job_id: str) -> None:
                             "df": df,
                         })
                 except ValueError as e:
-                    # Unsupported datasource — fall back to screenshot
-                    print(f"[runner] {e} — falling back to screenshot")
-                    chart_panels.append(panel)
+                    # Unsupported datasource — screenshot already captured above
+                    _log(f"Table panel '{panel['title']}': datasource not supported for CSV, screenshot included in PDF")
                 except Exception as e:
                     _log(f"Table panel {panel['title']} failed: {e}")
 
-        _log(f"Screenshots captured: {len(panels_data)} chart panel(s), {len(table_panels_data)} table panel(s)")
+        _log(f"Screenshots captured: {len(panels_data)} panel(s) for PDF, {len(table_panels_data)} table panel(s) for CSV")
 
-        # Build PDF for chart panels
+        # Build PDF (chart panels + table panel screenshots)
         if panels_data:
-            pdf_path = pdf_builder.build(job, panels_data)
+            pdf_path = pdf_builder.build(job, panels_data, dashboard_screenshots)
             attachments.append(pdf_path)
             _log(f"PDF built: {pdf_path}")
 

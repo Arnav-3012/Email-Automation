@@ -2,14 +2,14 @@
 
 import sys
 import threading
-from datetime import date, datetime
+import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 
-from app import config_manager, scheduler
+from app import config_manager, contact_manager, scheduler
 import runner
 
 st.set_page_config(page_title="Dashboard", page_icon="📋", layout="wide")
@@ -17,11 +17,14 @@ st.title("Dashboard")
 
 jobs = config_manager.get_jobs()
 
+if "job_draft_dashboards" not in st.session_state:
+    st.session_state["job_draft_dashboards"] = []
+
 # ---------------------------------------------------------------------------
 # Metrics row
 # ---------------------------------------------------------------------------
 
-today_str = date.today().isoformat()
+today_str = datetime.date.today().isoformat()
 
 active_count = sum(1 for j in jobs if j.get("status") == "active")
 total_count = len(jobs)
@@ -46,14 +49,16 @@ st.divider()
 if not jobs:
     st.info("No jobs yet. Use New Job in the sidebar to create one.")
 else:
-    for idx, job in enumerate(jobs):
+    for job in jobs:
+        job_id = job["id"]
+
         with st.container():
-            left, right = st.columns([3, 2], gap="medium")
+            left, right = st.columns([2, 1.5])
 
             # ---- Left column ------------------------------------------------
             with left:
                 status_badge = "🟢" if job.get("status") == "active" else "⏸"
-                st.markdown(f"### {status_badge} {job['name']}")
+                st.markdown(f"**{status_badge} {job['name']}**")
 
                 dash_count = len(job.get("dashboards", []))
                 recip_count = len(job.get("recipient_ids", []))
@@ -81,7 +86,7 @@ else:
                     st.markdown("*Never run*")
                 else:
                     try:
-                        run_dt = datetime.fromisoformat(last_run)
+                        run_dt = datetime.datetime.fromisoformat(last_run)
                         run_label = run_dt.strftime("%d %b %Y %H:%M")
                     except (ValueError, TypeError):
                         run_label = str(last_run)
@@ -96,12 +101,11 @@ else:
 
             # ---- Right column -----------------------------------------------
             with right:
-                job_id = job["id"]
+                b1, b2, b3, b4 = st.columns([1.2, 1.2, 1, 1])
 
-                btn1, btn2, btn3 = st.columns(3)
-
-                with btn1:
-                    if st.button("▶ Run now", key=f"run_{job_id}", use_container_width=True):
+                with b1:
+                    if st.button("▶ Run", key=f"run_{job_id}",
+                                 use_container_width=True, type="primary"):
                         threading.Thread(
                             target=runner.run_job,
                             args=(job_id,),
@@ -109,21 +113,31 @@ else:
                         ).start()
                         st.toast("Job started.")
 
-                with btn2:
+                with b2:
                     if job.get("status") == "active":
-                        if st.button("⏸ Pause", key=f"pause_{job_id}", use_container_width=True):
+                        if st.button("⏸ Pause", key=f"pause_{job_id}",
+                                     use_container_width=True):
                             config_manager.upsert_job({**job, "status": "paused"})
                             scheduler.remove_job(job_id)
                             st.rerun()
                     else:
-                        if st.button("▶ Resume", key=f"resume_{job_id}", use_container_width=True):
+                        if st.button("▶ Resume", key=f"resume_{job_id}",
+                                     use_container_width=True, type="primary"):
                             updated = {**job, "status": "active"}
                             config_manager.upsert_job(updated)
                             scheduler.add_or_update_job(updated)
                             st.rerun()
 
-                with btn3:
-                    if st.button("🗑 Delete", key=f"del_{job_id}", use_container_width=True):
+                with b3:
+                    if st.button("✏ Edit", key=f"edit_{job_id}",
+                                 use_container_width=True):
+                        st.session_state["edit_job_id"] = job_id
+                        st.session_state["edit_mode"] = True
+                        st.switch_page("pages/4_New_Job.py")
+
+                with b4:
+                    if st.button("🗑 Del", key=f"del_{job_id}",
+                                 use_container_width=True):
                         config_manager.delete_job(job_id)
                         scheduler.remove_job(job_id)
                         st.rerun()
@@ -131,5 +145,4 @@ else:
                 next_run = scheduler.get_next_run(job_id)
                 st.caption(f"Next run: {next_run}")
 
-        if idx < len(jobs) - 1:
-            st.divider()
+        st.divider()

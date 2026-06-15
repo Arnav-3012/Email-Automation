@@ -158,6 +158,69 @@ def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int) -> list[by
 # Public API
 # ---------------------------------------------------------------------------
 
+def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
+    """Capture a full-height screenshot of a Grafana dashboard in kiosk mode.
+
+    Scrolls through the page first so lazy-loaded panels render, then expands
+    the browser window to the full scrollHeight before taking the final shot.
+    """
+    base_url = grafana_settings.get("url", "").rstrip("/")
+    username = grafana_settings.get("username", "")
+    password = grafana_settings.get("password", "")
+
+    driver = None
+    try:
+        driver = _get_chrome_driver()
+        _login(driver, base_url, username, password)
+    except Exception:
+        try:
+            if driver:
+                driver.quit()
+            driver = _get_edge_driver()
+            _login(driver, base_url, username, password)
+        except Exception as e:
+            print(f"[screenshot_taker] Full dashboard capture failed: {e}", flush=True)
+            return _unavailable_png_bytes()
+
+    try:
+        url = f"{base_url}/d/{dashboard_uid}?orgId=1&kiosk&theme=light&from=now-6h&to=now"
+        driver.set_window_size(1920, 1080)
+        driver.get(url)
+        time.sleep(5)  # wait for initial panel render
+
+        # Scroll through the page so every panel (including lazy-loaded ones) renders
+        viewport_h: int = driver.execute_script("return window.innerHeight")
+        scroll_y = 0
+        while True:
+            total_h = driver.execute_script("return document.body.scrollHeight")
+            if scroll_y >= total_h:
+                break
+            driver.execute_script(f"window.scrollTo(0, {scroll_y})")
+            time.sleep(0.4)
+            scroll_y += viewport_h
+
+        # Re-measure after scrolling (lazy content may have extended the page)
+        total_h = driver.execute_script("return document.body.scrollHeight")
+        total_w = driver.execute_script("return document.body.scrollWidth")
+
+        # Expand window to the full content size for a single-shot capture
+        driver.set_window_size(max(1920, total_w), max(1080, min(total_h, 12000)))
+        time.sleep(3)  # allow re-render at new viewport size
+
+        driver.execute_script("window.scrollTo(0, 0)")
+        time.sleep(0.5)
+        return driver.get_screenshot_as_png()
+
+    except Exception as e:
+        print(f"[screenshot_taker] Full dashboard screenshot failed: {e}", flush=True)
+        return _unavailable_png_bytes()
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
 def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) -> dict[int, list[bytes]]:
     """Screenshot every panel, trying Chrome → Edge → mss in order.
 

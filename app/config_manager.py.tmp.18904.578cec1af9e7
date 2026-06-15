@@ -91,7 +91,7 @@ def update_smtp_settings(
     username: str = "",
     password: str = "",
     force_smtp: bool = False,
-    tls_mode: str = "starttls",
+    tls_mode: str = "auto",
 ) -> None:
     """Persist SMTP connection settings to config.json."""
     config = load()
