@@ -95,6 +95,42 @@ else:
 st.divider()
 
 # ---------------------------------------------------------------------------
+# Email Options
+# ---------------------------------------------------------------------------
+
+st.subheader("Email Options")
+
+st.session_state.setdefault("email_subject", "")
+st.session_state.setdefault("email_message", "")
+
+st.text_input(
+    "Custom email subject (optional)",
+    placeholder="Leave blank to use: <Job Name> – DD Mon YYYY",
+    key="email_subject",
+)
+
+st.text_area(
+    "Custom message (optional)",
+    placeholder="Add a note to appear in the email body...",
+    key="email_message",
+    height=100,
+)
+
+st.caption("Custom panel names (optional) — rename panels as they appear in the email and PDF")
+
+for dash_entry in draft_dashboards:
+    if dash_entry.get("panels"):
+        st.write(f"**{dash_entry['title']}**")
+        for panel_id in dash_entry["panels"]:
+            st.text_input(
+                f"Panel {panel_id} display name",
+                placeholder=f"Panel {panel_id}",
+                key=f"panel_name_{panel_id}",
+            )
+
+st.divider()
+
+# ---------------------------------------------------------------------------
 # Save & Schedule
 # ---------------------------------------------------------------------------
 
@@ -111,6 +147,14 @@ if st.button("Save & Schedule", type="primary"):
         st.error(err)
 
     if not errors:
+        # Collect custom panel names from session state
+        panel_names: dict = {}
+        for dash_entry in draft_dashboards:
+            for panel_id in dash_entry.get("panels", []):
+                custom = st.session_state.get(f"panel_name_{panel_id}", "").strip()
+                if custom:
+                    panel_names[str(panel_id)] = custom
+
         job: dict = {
             "id": f"job_{uuid.uuid4().hex[:6]}",
             "name": job_name.strip(),
@@ -131,12 +175,23 @@ if st.button("Save & Schedule", type="primary"):
                 "time": schedule_time.strftime("%H:%M"),
                 "days": selected_days,
             },
+            "email_subject": st.session_state.get("email_subject", "").strip(),
+            "email_message": st.session_state.get("email_message", "").strip(),
+            "panel_names": panel_names,
             "last_run": None,
             "last_status": None,
         }
 
         config_manager.upsert_job(job)
         scheduler.add_or_update_job(job)
+
+        # Clear draft and email option state
         st.session_state["job_draft_dashboards"] = []
+        st.session_state["email_subject"] = ""
+        st.session_state["email_message"] = ""
+        for key in list(st.session_state.keys()):
+            if key.startswith("panel_name_"):
+                del st.session_state[key]
+
         st.success(f"Job '{job['name']}' saved and scheduled.")
         st.rerun()

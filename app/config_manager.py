@@ -114,6 +114,9 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 def upsert_job(job: dict[str, Any]) -> None:
     """Add a new job or replace an existing one (matched by id) in config.json."""
+    job.setdefault("email_subject", "")
+    job.setdefault("email_message", "")
+    job.setdefault("panel_names", {})
     config = load()
     jobs = config.get("jobs", [])
     idx = next((i for i, j in enumerate(jobs) if j["id"] == job["id"]), None)

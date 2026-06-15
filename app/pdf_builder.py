@@ -125,10 +125,11 @@ def _build_single_page(
     available_h = y - _BOTTOM_MARGIN
     per_img_h = max((available_h - total_overhead) / N, 0) if N > 0 else 0
 
-    # Draw each panel
+    # Draw each panel — screenshot is list[bytes]; use first chunk for single-page layout
     for panel in panels_data:
         panel_title = panel.get("panel_title", "Panel")
-        png_bytes = panel.get("screenshot") or b""
+        screenshot = panel.get("screenshot") or []
+        png_bytes = screenshot[0] if screenshot else b""
 
         c.setFont("Helvetica-Bold", 8)
         c.setFillColor(colors.black)
@@ -386,12 +387,13 @@ def _panel_block(
     panel: dict[str, Any],
     styles: dict[str, ParagraphStyle],
 ) -> KeepTogether:
-    """Return a KeepTogether block containing the panel title and screenshot."""
-    elements: list = [
-        Paragraph(panel.get("panel_title", "Panel"), styles["panel_title"]),
-        _make_image(panel.get("screenshot") or b""),
-        Spacer(1, 0.4 * cm),
-    ]
+    """Return a KeepTogether block containing the panel title and all screenshot chunks."""
+    elements: list = [Paragraph(panel.get("panel_title", "Panel"), styles["panel_title"])]
+    for png_bytes in (panel.get("screenshot") or []):
+        img_obj = _make_image(png_bytes)
+        elements.append(img_obj)
+        elements.append(Spacer(1, 6))
+    elements.append(Spacer(1, 0.4 * cm))
     return KeepTogether(elements)
 
 

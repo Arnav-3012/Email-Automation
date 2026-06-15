@@ -170,27 +170,26 @@ def get_panels(dashboard_json: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract panel metadata from a dashboard JSON response.
 
     Accepts the full response from get_dashboard(). Returns a list of dicts,
-    one per panel, with keys: id, title, type, targets, datasource_uid.
-    Panels with no targets are included with an empty targets list.
+    one per panel, with keys: id, title, type, datasource_uid, datasource_type,
+    targets. Datasource is resolved from the panel level, falling back to the
+    first target if the panel-level field is absent.
     """
-    dashboard = dashboard_json.get("dashboard", {})
-    raw_panels = dashboard.get("panels", [])
     panels: list[dict[str, Any]] = []
-    for panel in raw_panels:
+    dashboard = dashboard_json.get("dashboard", {})
+    for panel in dashboard.get("panels", []):
+        panel_ds = panel.get("datasource") or {}
+        if not panel_ds and panel.get("targets"):
+            panel_ds = panel["targets"][0].get("datasource") or {}
+
         panels.append({
             "id": panel.get("id"),
             "title": panel.get("title", "Untitled"),
-            "type": panel.get("type", "unknown"),
-            "datasource_uid": (panel.get("datasource") or {}).get("uid"),
-            "targets": [
-                {
-                    "refId": t.get("refId", "A"),
-                    "rawSql": t.get("rawSql", ""),
-                    "format": t.get("format", "time_series"),
-                    "datasource_uid": (t.get("datasource") or {}).get("uid"),
-                }
-                for t in panel.get("targets", [])
-            ],
+            "type": panel.get("type", ""),
+            "description": panel.get("description", ""),
+            "datasource_uid": panel_ds.get("uid", ""),
+            "datasource_type": panel_ds.get("type", ""),
+            "targets": panel.get("targets", []),
+            "fieldConfig": panel.get("fieldConfig", {}),
         })
     return panels
 

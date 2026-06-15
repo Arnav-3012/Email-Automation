@@ -24,6 +24,9 @@ if "job_draft_dashboards" not in st.session_state:
     st.session_state["job_draft_dashboards"] = []
 if "selected_dashboard" not in st.session_state:
     st.session_state["selected_dashboard"] = None
+st.session_state.setdefault("email_subject", "")
+st.session_state.setdefault("email_message", "")
+st.session_state.setdefault("panel_names", {})
 
 # ---------------------------------------------------------------------------
 # Sidebar — scheduler status

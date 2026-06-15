@@ -16,16 +16,95 @@ def fetch_panel_data(
 ) -> pd.DataFrame:
     """Query Grafana for a panel's data and return it as a DataFrame.
 
-    Builds a /api/ds/query payload from the panel's targets, posts it via
-    grafana_client.execute_ds_query(), and parses the response frames.
-    Returns an empty DataFrame on any error or when the panel has no data.
-    Never raises — all failures produce an empty DataFrame.
+    Detects datasource type from the first target and routes to the
+    appropriate fetch function. Raises ValueError for SQL panels with no
+    valid query so the caller can fall back to a screenshot.
     """
-    queries = _build_queries(panel_meta)
-    if not queries:
+    targets = panel_meta.get("targets", [])
+    if not targets:
         return pd.DataFrame()
 
-    payload: dict[str, Any] = {
+    ds_type = (
+        panel_meta.get("datasource_type")
+        or (panel_meta.get("targets", [{}])[0].get("datasource", {}).get("type", ""))
+    ).lower()
+
+    ds_uid = (
+        panel_meta.get("datasource_uid")
+        or (panel_meta.get("targets", [{}])[0].get("datasource", {}).get("uid", ""))
+    )
+
+    print(f"[data_fetcher] Panel '{panel_meta.get('title')}' datasource: {ds_type}")
+
+    if "testdata" in ds_type or ds_uid == "-- Grafana --":
+        return _fetch_testdata(panel_meta, grafana_client, time_from, time_to)
+
+    return _fetch_sql(panel_meta, grafana_client, time_from, time_to)
+
+
+def _fetch_testdata(
+    panel_meta: dict[str, Any],
+    grafana_client: ModuleType,
+    time_from: str,
+    time_to: str,
+) -> pd.DataFrame:
+    """Fetch data from Grafana TestData datasource."""
+    targets = panel_meta.get("targets", [])
+    all_frames = []
+
+    ds_uid = panel_meta.get("datasource_uid", "-- Grafana --")
+    for i, target in enumerate(targets):
+        try:
+            scenario = target.get("scenarioId", "random_walk")
+
+            queries = [
+                {
+                    "datasource": {"uid": ds_uid, "type": "testdata"},
+                    "scenarioId": scenario,
+                    "refId": chr(65 + i),
+                    "intervalMs": 60000,
+                    "maxDataPoints": 500,
+                    "alias": target.get("alias", ""),
+                    "seriesCount": target.get("seriesCount", 1),
+                    "stringInput": target.get("stringInput", ""),
+                    "lines": target.get("lines", 10),
+                }
+            ]
+            payload = {
+                "queries": queries,
+                "from": time_from,
+                "to": time_to,
+            }
+
+            response = grafana_client.execute_ds_query(payload)
+            df = _parse_response(response, queries)
+            if not df.empty:
+                all_frames.append(df)
+        except Exception as e:
+            print(f"[data_fetcher] TestData target {i} failed: {e}")
+
+    if not all_frames:
+        return pd.DataFrame()
+    return pd.concat(all_frames, ignore_index=True)
+
+
+def _fetch_sql(
+    panel_meta: dict[str, Any],
+    grafana_client: ModuleType,
+    time_from: str,
+    time_to: str,
+) -> pd.DataFrame:
+    """Fetch data from SQL datasource (MySQL, PostgreSQL etc)."""
+    targets = panel_meta.get("targets", [])
+    queries = _build_queries(targets, panel_meta.get("datasource_uid", ""))
+
+    if not queries:
+        raise ValueError(
+            f"No SQL query found in panel '{panel_meta.get('title')}'. "
+            f"Datasource may not be supported."
+        )
+
+    payload = {
         "queries": queries,
         "from": time_from,
         "to": time_to,
@@ -33,44 +112,42 @@ def fetch_panel_data(
 
     try:
         response = grafana_client.execute_ds_query(payload)
-    except GrafanaConnectionError:
+        return _parse_response(response, queries)
+    except Exception as e:
+        print(f"[data_fetcher] SQL fetch failed: {e}")
         return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-    return _parse_response(response, queries)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _build_queries(panel_meta: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build the queries list for the /api/ds/query payload from panel metadata.
-
-    Each target with a non-empty rawSql becomes one query entry.
-    The datasource uid is taken from the target first, then falls back to
-    the panel-level datasource_uid.
-    """
+def _build_queries(
+    targets: list[dict[str, Any]],
+    datasource_uid: str,
+) -> list[dict[str, Any]]:
+    """Build the queries list for the /api/ds/query payload from panel targets."""
     queries: list[dict[str, Any]] = []
-    panel_ds_uid = panel_meta.get("datasource_uid")
-
-    for target in panel_meta.get("targets", []):
-        raw_sql = target.get("rawSql", "").strip()
-        if not raw_sql:
-            continue
-        ds_uid = target.get("datasource_uid") or panel_ds_uid
-        if not ds_uid:
+    for i, target in enumerate(targets):
+        raw_sql = (
+            target.get("rawSql")
+            or target.get("rawQuery")
+            or (target.get("sql") or {}).get("rawSql")
+            or target.get("query")
+            or ""
+        )
+        ds_uid = (
+            (target.get("datasource") or {}).get("uid")
+            or target.get("datasourceUid")
+            or datasource_uid
+            or ""
+        )
+        if not raw_sql or not ds_uid:
             continue
         queries.append({
             "datasource": {"uid": ds_uid},
             "rawSql": raw_sql,
-            "format": target.get("format", "time_series"),
-            "refId": target.get("refId", "A"),
+            "format": "table",
+            "refId": chr(65 + i),
             "intervalMs": 60000,
             "maxDataPoints": 500,
         })
-
     return queries
 
 

@@ -11,8 +11,13 @@ from typing import Any
 from app import config_manager
 
 
-def send(to_contacts: list[dict[str, Any]], subject: str, pdf_path: str) -> None:
-    """Send the PDF report to all contacts, choosing the appropriate mail method.
+def send(
+    to_contacts: list[dict[str, Any]],
+    subject: str,
+    attachments: list,
+    custom_message: str = "",
+) -> None:
+    """Send all attachments to all contacts, choosing the appropriate mail method.
 
     Priority:
     1. force_smtp=true in config → SMTP directly, Outlook skipped.
@@ -28,28 +33,35 @@ def send(to_contacts: list[dict[str, Any]], subject: str, pdf_path: str) -> None
     force_smtp = smtp.get("force_smtp", False)
 
     if force_smtp:
-        _smtp_send(to_contacts, subject, pdf_path)
+        _smtp_send(to_contacts, subject, attachments, custom_message)
         return
 
     if platform.system() == "Windows":
         try:
-            _outlook_send(to_contacts, subject, pdf_path)
+            _outlook_send(to_contacts, subject, attachments, custom_message)
             return
         except Exception as e:
             print(f"[mailer] win32com failed ({e}), falling back to SMTP")
-            _smtp_send(to_contacts, subject, pdf_path)
+            _smtp_send(to_contacts, subject, attachments, custom_message)
             return
 
-    _smtp_send(to_contacts, subject, pdf_path)
+    _smtp_send(to_contacts, subject, attachments, custom_message)
 
 
 # ---------------------------------------------------------------------------
 # HTML body
 # ---------------------------------------------------------------------------
 
-def _html_body(name: str = "") -> str:
-    """Return a clean minimal HTML email body, optionally personalised with name."""
+def _html_body(name: str = "", custom_message: str = "") -> str:
+    """Return a clean minimal HTML email body, optionally personalised with name and message."""
     greeting = f"Hello {name}," if name else "Hello,"
+    msg_block = ""
+    if custom_message:
+        msg_block = (
+            '<p style="margin:16px 0; padding:12px; '
+            'background:#f5f5f5; border-left:3px solid #ccc;">'
+            f"{custom_message}</p>"
+        )
     return f"""\
 <!DOCTYPE html>
 <html>
@@ -57,7 +69,8 @@ def _html_body(name: str = "") -> str:
              margin: 0; padding: 24px; max-width: 600px;">
   <p style="margin-top: 0;">{greeting}</p>
   <p>Please find attached your scheduled Grafana report.</p>
-  <p>The full report is included as a PDF attachment.</p>
+  {msg_block}
+  <p>The full report is included as an attachment.</p>
   <br>
   <hr style="border: none; border-top: 1px solid #eeeeee; margin: 16px 0;">
   <p style="color: #888888; font-size: 12px; margin-bottom: 0;">
@@ -74,7 +87,8 @@ def _html_body(name: str = "") -> str:
 def _outlook_send(
     to_contacts: list[dict[str, Any]],
     subject: str,
-    pdf_path: str,
+    attachments: list,
+    custom_message: str = "",
 ) -> None:
     """Send via the local Outlook application using win32com (Windows only).
 
@@ -97,8 +111,12 @@ def _outlook_send(
             f"{c['name']} <{c['email']}>" for c in to_contacts
         )
         mail.Subject = subject
-        mail.HTMLBody = _html_body()
-        mail.Attachments.Add(str(Path(pdf_path).resolve()))
+        mail.HTMLBody = _html_body(
+            to_contacts[0]["name"] if to_contacts else "",
+            custom_message,
+        )
+        for att in attachments:
+            mail.Attachments.Add(str(Path(att).resolve()))
         mail.Send()
     except Exception as exc:
         raise RuntimeError(f"Outlook send failed: {exc}") from exc
@@ -111,7 +129,8 @@ def _outlook_send(
 def _smtp_send(
     to_contacts: list[dict[str, Any]],
     subject: str,
-    pdf_path: str,
+    attachments: list,
+    custom_message: str = "",
 ) -> None:
     """Send via SMTP, one individually addressed email per contact.
 
@@ -138,7 +157,7 @@ def _smtp_send(
             with smtplib.SMTP(host, port, timeout=30) as server:
                 server.ehlo()
                 for contact in to_contacts:
-                    msg = _build_mime(contact, subject, pdf_path)
+                    msg = _build_mime(contact, subject, attachments, custom_message=custom_message)
                     server.send_message(msg)
         else:
             # External SMTP — STARTTLS + auth (Gmail, Mailtrap, etc)
@@ -148,7 +167,7 @@ def _smtp_send(
                 server.ehlo()
                 server.login(username, password)
                 for contact in to_contacts:
-                    msg = _build_mime(contact, subject, pdf_path, from_addr=username)
+                    msg = _build_mime(contact, subject, attachments, from_addr=username, custom_message=custom_message)
                     server.send_message(msg)
     except smtplib.SMTPException as exc:
         raise RuntimeError(f"SMTP send failed: {exc}") from exc
@@ -161,22 +180,21 @@ def _smtp_send(
 def _build_mime(
     contact: dict[str, Any],
     subject: str,
-    pdf_path: str,
+    attachments: list,
     from_addr: str = "",
+    custom_message: str = "",
 ) -> MIMEMultipart:
-    """Build a MIMEMultipart email with an HTML body and PDF attachment."""
-    pdf_bytes = Path(pdf_path).read_bytes()
-    pdf_name = Path(pdf_path).name
-
+    """Build a MIMEMultipart email with an HTML body and one or more file attachments."""
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = f"{contact['name']} <{contact['email']}>"
 
-    msg.attach(MIMEText(_html_body(contact["name"]), "html", "utf-8"))
+    msg.attach(MIMEText(_html_body(contact.get("name", ""), custom_message), "html", "utf-8"))
 
-    attachment = MIMEApplication(pdf_bytes, Name=pdf_name)
-    attachment["Content-Disposition"] = f'attachment; filename="{pdf_name}"'
-    msg.attach(attachment)
+    for att_path in attachments:
+        part = MIMEApplication(Path(att_path).read_bytes())
+        part["Content-Disposition"] = f'attachment; filename="{Path(att_path).name}"'
+        msg.attach(part)
 
     return msg
