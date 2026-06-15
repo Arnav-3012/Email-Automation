@@ -22,8 +22,12 @@ smtp = config_manager.get_smtp_settings()
 
 st.header("Grafana Settings")
 
+st.info(
+    "Authentication uses your Grafana username and password. "
+    "The user must have Admin role to access all organisations."
+)
+
 grafana_url = st.text_input("Grafana Server URL", value=grafana["url"])
-grafana_api_key = st.text_input("API Key", value=grafana["api_key"], type="password")
 grafana_username = st.text_input("Username", value=grafana["username"])
 grafana_password = st.text_input("Password", value=grafana["password"], type="password")
 
@@ -33,7 +37,6 @@ with col_save:
     if st.button("Save Grafana Settings", use_container_width=True):
         config_manager.update_grafana_settings(
             url=grafana_url,
-            api_key=grafana_api_key,
             username=grafana_username,
             password=grafana_password,
         )
@@ -43,7 +46,6 @@ with col_test:
     if st.button("Test Connection", use_container_width=True):
         config_manager.update_grafana_settings(
             url=grafana_url,
-            api_key=grafana_api_key,
             username=grafana_username,
             password=grafana_password,
         )

@@ -9,9 +9,9 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 _DEFAULT_CONFIG: dict[str, Any] = {
     "grafana": {
         "url": "",
-        "api_key": "",
         "username": "",
-        "password": ""
+        "password": "",
+        "org_id": 1
     },
     "smtp": {
         "host": "",
@@ -47,27 +47,27 @@ def save(config: dict[str, Any]) -> None:
         raise RuntimeError(f"Failed to write {CONFIG_PATH}: {e}") from e
 
 
-def get_grafana_settings() -> dict[str, str]:
-    """Return grafana connection settings: url, api_key, username, password."""
+def get_grafana_settings() -> dict[str, Any]:
+    """Return grafana connection settings: url, username, password, org_id."""
     stored = load().get("grafana", {})
     return {
         "url": stored.get("url", ""),
-        "api_key": stored.get("api_key", ""),
         "username": stored.get("username", ""),
         "password": stored.get("password", ""),
+        "org_id": int(stored.get("org_id", 1)),
     }
 
 
 def update_grafana_settings(
-    url: str, api_key: str, username: str = "", password: str = ""
+    url: str, username: str = "", password: str = "", org_id: int = 1
 ) -> None:
-    """Persist Grafana connection settings (URL, API key, login credentials) to config.json."""
+    """Persist Grafana connection settings (URL and admin credentials) to config.json."""
     config = load()
     config["grafana"] = {
         "url": url,
-        "api_key": api_key,
         "username": username,
         "password": password,
+        "org_id": org_id,
     }
     save(config)
 

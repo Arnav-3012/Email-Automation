@@ -1,110 +1,134 @@
 """Grafana REST API client — all HTTP calls to the Grafana instance live here."""
 
 import requests
-from typing import Any
 
-from app.config_manager import get_grafana_settings
+from app import config_manager
 
 
 class GrafanaConnectionError(Exception):
     """Raised when a Grafana API call fails or returns an unexpected response."""
 
 
-def _get_session() -> tuple[str, requests.Session]:
-    """Build a requests.Session pre-loaded with the Bearer token header.
-
-    Returns a (base_url, session) tuple. Raises GrafanaConnectionError if
-    the config has no URL or API key.
-    """
-    settings = get_grafana_settings()
-    url = settings.get("url", "").rstrip("/")
-    api_key = settings.get("api_key", "")
-    if not url:
-        raise GrafanaConnectionError("Grafana URL is not configured. Go to Settings.")
-    if not api_key:
-        raise GrafanaConnectionError("Grafana API key is not configured. Go to Settings.")
+def _get_session() -> requests.Session:
+    """Return a Session using Basic Auth and X-Grafana-Org-Id for cross-org access."""
+    settings = config_manager.get_grafana_settings()
+    username = settings.get("username", "")
+    password = settings.get("password", "")
+    org_id = settings.get("org_id", 1)
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {api_key}"})
-    return url, session
+    session.auth = (username, password)
+    session.headers.update({
+        "X-Grafana-Org-Id": str(org_id),
+        "Content-Type": "application/json",
+    })
+    return session
 
 
-def _get(path: str, params: dict[str, Any] | None = None) -> Any:
+def _get(path: str, params: dict = None) -> any:
     """GET {base_url}{path} and return parsed JSON. Raises GrafanaConnectionError on any failure."""
-    base_url, session = _get_session()
+    settings = config_manager.get_grafana_settings()
+    base_url = settings.get("url", "").rstrip("/")
+    session = _get_session()
     try:
         resp = session.get(f"{base_url}{path}", params=params, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError as e:
-        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}") from e
-    except requests.exceptions.Timeout:
-        raise GrafanaConnectionError(f"Request timed out: {base_url}{path}")
+        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}")
     except requests.exceptions.HTTPError as e:
-        raise GrafanaConnectionError(f"HTTP {resp.status_code} from {path}: {e}") from e
-    except requests.exceptions.RequestException as e:
-        raise GrafanaConnectionError(f"Request failed for {path}: {e}") from e
+        raise GrafanaConnectionError(f"HTTP {resp.status_code} from {path}: {e}")
+    except Exception as e:
+        raise GrafanaConnectionError(f"Request failed: {e}")
 
 
-def _post(path: str, payload: dict[str, Any]) -> Any:
+def _post(path: str, payload: dict) -> any:
     """POST {base_url}{path} with a JSON payload. Raises GrafanaConnectionError on any failure."""
-    base_url, session = _get_session()
+    settings = config_manager.get_grafana_settings()
+    base_url = settings.get("url", "").rstrip("/")
+    session = _get_session()
     try:
         resp = session.post(f"{base_url}{path}", json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError as e:
-        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}") from e
-    except requests.exceptions.Timeout:
-        raise GrafanaConnectionError(f"Request timed out: {base_url}{path}")
+        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}")
     except requests.exceptions.HTTPError as e:
-        raise GrafanaConnectionError(f"HTTP {resp.status_code} from {path}: {e}") from e
-    except requests.exceptions.RequestException as e:
-        raise GrafanaConnectionError(f"Request failed for {path}: {e}") from e
+        raise GrafanaConnectionError(f"HTTP {resp.status_code} from {path}: {e}")
+    except Exception as e:
+        raise GrafanaConnectionError(f"Request failed: {e}")
 
 
-def execute_ds_query(payload: dict[str, Any]) -> dict[str, Any]:
-    """POST to /api/ds/query and return the full response dict.
-
-    payload must follow the MySQL ds/query format described in CLAUDE.md.
-    Raises GrafanaConnectionError on network or HTTP failure.
-    """
+def execute_ds_query(payload: dict) -> dict:
+    """POST to /api/ds/query and return the full response dict."""
     return _post("/api/ds/query", payload)
 
 
-def test_connection() -> dict[str, str]:
-    """Ping /api/health and return the response dict.
-
-    Raises GrafanaConnectionError if the server is unreachable or returns an error.
-    """
+def test_connection() -> dict:
+    """Ping /api/health and return the response dict."""
     return _get("/api/health")
 
 
-def get_folders() -> list[dict[str, Any]]:
-    """Return all top-level Grafana folders.
+def get_organisations() -> list:
+    """Return all orgs via Basic Auth; falls back to current org only."""
+    settings = config_manager.get_grafana_settings()
+    base_url = settings.get("url", "").rstrip("/")
+    username = settings.get("username", "")
+    password = settings.get("password", "")
+    try:
+        resp = requests.get(
+            f"{base_url}/api/orgs",
+            auth=(username, password),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        current = _get("/api/org")
+        return [current]
+    except Exception:
+        try:
+            current = _get("/api/org")
+            return [current]
+        except Exception:
+            return []
 
-    Each item has at minimum: uid, title, id.
-    """
-    return _get("/api/folders")
+
+def get_current_org_id() -> int:
+    """Return the org_id currently stored in config."""
+    return int(config_manager.get_grafana_settings().get("org_id", 1))
 
 
-def get_subfolders(folder_uid: str) -> list[dict[str, Any]]:
+def get_folders() -> list:
+    """Return all top-level Grafana folders, prepending General for root dashboards."""
+    folders = _get("/api/folders")
+    try:
+        all_dash = _get_all_dashboards()
+        if any(not d.get("folderUid") for d in all_dash):
+            folders = [{"uid": "general", "title": "General (No Folder)"}] + folders
+    except Exception:
+        pass
+    return folders
+
+
+def get_subfolders(folder_uid: str) -> list:
     """Return child folders of a given folder, compatible with Grafana 8/9 and 10+.
 
     Tries GET /api/folders/{uid}/children first (Grafana 10+). On 404 falls back to
     GET /api/search?folderUid={uid}&type=dash-folder (Grafana 8/9), normalising the
     search results into the same {uid, title} shape. Any non-404 HTTP error raises
-    GrafanaConnectionError. Returns [] for "sharedwithme" without any API call.
+    GrafanaConnectionError. Returns [] for "sharedwithme" and "general" without any API call.
     """
-    if folder_uid == "sharedwithme":
+    if folder_uid in ("sharedwithme", "general"):
         return []
 
-    base_url, session = _get_session()
+    settings = config_manager.get_grafana_settings()
+    base_url = settings.get("url", "").rstrip("/")
+    session = _get_session()
     try:
         resp = session.get(
             f"{base_url}/api/folders/{folder_uid}/children", timeout=10
         )
     except requests.exceptions.ConnectionError as e:
-        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}") from e
+        raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}")
     except requests.exceptions.Timeout:
         raise GrafanaConnectionError(
             f"Request timed out: {base_url}/api/folders/{folder_uid}/children"
@@ -112,16 +136,14 @@ def get_subfolders(folder_uid: str) -> list[dict[str, Any]]:
     except requests.exceptions.RequestException as e:
         raise GrafanaConnectionError(
             f"Request failed for /api/folders/{folder_uid}/children: {e}"
-        ) from e
+        )
 
     if resp.status_code == 200:
         result = resp.json()
         subfolders = result if isinstance(result, list) else []
-        # Filter out the parent folder if the API erroneously returns it as its own child
         return [f for f in subfolders if f["uid"] != folder_uid]
 
     if resp.status_code == 404:
-        # Grafana 8/9 fallback: search for nested folders by parent uid
         results = _get("/api/search", params={"folderUid": folder_uid, "type": "dash-folder"})
         subfolders = [{"uid": item["uid"], "title": item["title"]} for item in results]
         return [f for f in subfolders if f["uid"] != folder_uid]
@@ -131,50 +153,50 @@ def get_subfolders(folder_uid: str) -> list[dict[str, Any]]:
     )
 
 
-_dashboard_cache: list[dict[str, Any]] | None = None
+_dashboard_cache: dict = {}
 
 
-def _get_all_dashboards() -> list[dict[str, Any]]:
-    """Fetch all dashboards once and cache the result for the current page render."""
+def _get_all_dashboards() -> list:
+    """Fetch all dashboards once per org and cache by org_id."""
     global _dashboard_cache
-    if _dashboard_cache is None:
-        _dashboard_cache = _get("/api/search", params={"type": "dash-db", "limit": 5000})
-    return _dashboard_cache
+    settings = config_manager.get_grafana_settings()
+    org_id = settings.get("org_id", 1)
+    if org_id not in _dashboard_cache:
+        _dashboard_cache[org_id] = _get(
+            "/api/search", params={"type": "dash-db", "limit": 5000}
+        )
+    return _dashboard_cache[org_id]
 
 
 def clear_dashboard_cache() -> None:
-    """Reset the dashboard cache — call at the top of each page render."""
+    """Reset the dashboard cache for all orgs."""
     global _dashboard_cache
-    _dashboard_cache = None
+    _dashboard_cache = {}
 
 
-def get_dashboards_in_folder(folder_uid: str) -> list[dict[str, Any]]:
+def get_dashboards_in_folder(folder_uid: str) -> list:
     """Return dashboards inside the given folder, filtered client-side from a full fetch.
 
-    /api/search?folderUid= does not filter reliably on all Grafana versions, so we
-    fetch all dashboards once (cached) and filter by folderUid here.
+    Handles the special "general" uid for dashboards that have no folder.
     """
-    return [d for d in _get_all_dashboards() if d.get("folderUid") == folder_uid]
+    all_dashboards = _get_all_dashboards()
+    if folder_uid == "general":
+        return [d for d in all_dashboards if not d.get("folderUid")]
+    return [d for d in all_dashboards if d.get("folderUid") == folder_uid]
 
 
-def get_dashboard(uid: str) -> dict[str, Any]:
-    """Fetch and return the full dashboard JSON for the given UID.
-
-    The returned dict has keys: dashboard (panel definitions + queries), meta.
-    Raises GrafanaConnectionError if the dashboard is not found.
-    """
+def get_dashboard(uid: str) -> dict:
+    """Fetch and return the full dashboard JSON for the given UID."""
     return _get(f"/api/dashboards/uid/{uid}")
 
 
-def get_panels(dashboard_json: dict[str, Any]) -> list[dict[str, Any]]:
+def get_panels(dashboard_json: dict) -> list:
     """Extract panel metadata from a dashboard JSON response.
 
-    Accepts the full response from get_dashboard(). Returns a list of dicts,
-    one per panel, with keys: id, title, type, datasource_uid, datasource_type,
-    targets. Datasource is resolved from the panel level, falling back to the
-    first target if the panel-level field is absent.
+    Returns a list of dicts with keys: id, title, type, datasource_uid,
+    datasource_type, targets, fieldConfig.
     """
-    panels: list[dict[str, Any]] = []
+    panels = []
     dashboard = dashboard_json.get("dashboard", {})
     for panel in dashboard.get("panels", []):
         panel_ds = panel.get("datasource") or {}
@@ -194,6 +216,6 @@ def get_panels(dashboard_json: dict[str, Any]) -> list[dict[str, Any]]:
     return panels
 
 
-def get_datasources() -> list[dict[str, Any]]:
+def get_datasources() -> list:
     """Return all configured datasources (used to resolve MySQL datasource UID)."""
     return _get("/api/datasources")

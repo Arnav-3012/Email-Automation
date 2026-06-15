@@ -91,7 +91,7 @@ def _login(driver, base_url: str, username: str, password: str) -> None:
 # Screenshot helpers
 # ---------------------------------------------------------------------------
 
-def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: int) -> list[bytes]:
+def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1) -> list[bytes]:
     """Navigate to the panel URL and return PNG chunks as a list of bytes.
 
     Resizes the window to the full page height so tall panels are captured
@@ -100,7 +100,7 @@ def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: in
     """
     url = (
         f"{base_url}/d-solo/{dashboard_uid}"
-        f"?orgId=1&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
+        f"?orgId={org_id}&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
     )
     driver.set_window_size(1280, 800)
     driver.get(url)
@@ -132,13 +132,13 @@ def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: in
     return chunks
 
 
-def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int) -> list[bytes]:
+def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1) -> list[bytes]:
     """Open the panel URL in the default browser and capture the full screen with mss."""
     import mss
 
     url = (
         f"{base_url}/d-solo/{dashboard_uid}"
-        f"?orgId=1&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
+        f"?orgId={org_id}&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
     )
     subprocess.Popen(["cmd", "/c", "start", url])
     time.sleep(8)
@@ -183,7 +183,8 @@ def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
             return _unavailable_png_bytes()
 
     try:
-        url = f"{base_url}/d/{dashboard_uid}?orgId=1&kiosk&theme=light&from=now-6h&to=now"
+        org_id = grafana_settings.get("org_id", 1)
+        url = f"{base_url}/d/{dashboard_uid}?orgId={org_id}&kiosk&theme=light&from=now-6h&to=now"
         driver.set_window_size(1920, 1080)
         driver.get(url)
         time.sleep(5)  # wait for initial panel render
@@ -231,6 +232,7 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
     base_url = grafana_settings.get("url", "").rstrip("/")
     username = grafana_settings.get("username", "")
     password = grafana_settings.get("password", "")
+    org_id = grafana_settings.get("org_id", 1)
 
     results: dict[int, list[bytes]] = {}
     driver = None
@@ -264,7 +266,7 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
         try:
             for panel_id in panel_ids:
                 try:
-                    chunks = _selenium_screenshot(driver, base_url, dashboard_uid, panel_id)
+                    chunks = _selenium_screenshot(driver, base_url, dashboard_uid, panel_id, org_id)
                     results[panel_id] = chunks
                     print(f"[screenshot_taker] Panel {panel_id} captured via {method} ({len(chunks)} chunk(s))", flush=True)
                 except Exception as e:
@@ -281,7 +283,7 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
     print("[screenshot_taker] Selenium blocked, trying mss screen capture...", flush=True)
     for panel_id in panel_ids:
         try:
-            chunks = _mss_screenshot(base_url, dashboard_uid, panel_id)
+            chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id)
             results[panel_id] = chunks
             print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
         except Exception as e:
