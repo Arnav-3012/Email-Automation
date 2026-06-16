@@ -9,3 +9,4 @@ webdriver-manager
 Pillow
 pdf2image
 mss
+bcrypt

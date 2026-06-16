@@ -10,9 +10,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import streamlit as st
 
 from app import config_manager, contact_manager, scheduler
+from app.auth_manager import require_auth
 import runner
 
-st.set_page_config(page_title="Dashboard", page_icon="📋", layout="wide")
+require_auth(page_title="Dashboard", page_icon="📋")
 st.title("Dashboard")
 
 jobs = config_manager.get_jobs()

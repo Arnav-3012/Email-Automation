@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import streamlit as st
 
 from app import contact_manager
+from app.auth_manager import require_auth
 
-st.set_page_config(page_title="Contacts", page_icon="👥", layout="wide")
+require_auth(page_title="Contacts", page_icon="👥")
 st.title("Contacts")
 
 # ---------------------------------------------------------------------------

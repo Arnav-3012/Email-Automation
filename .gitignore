@@ -1,6 +1,8 @@
 # Credentials and local config
 config.json
 contacts.json
+app_users.json
+audit_log.json
 
 # Generated output
 output/

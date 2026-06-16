@@ -2,9 +2,9 @@
 
 import argparse
 import csv
-import os
 import sys
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from app import (
@@ -18,6 +18,11 @@ from app import (
 )
 
 TABLE_TYPES = {"table", "datagrid", "table-old"}
+
+# Anchored to the project root so it's correct regardless of the cwd the
+# process was launched from (e.g. a Task Scheduler entry without a "Start in"
+# directory set to this folder).
+OUTPUT_DIR = Path(__file__).parent / "output"
 
 
 def _log(msg: str) -> None:
@@ -137,12 +142,12 @@ def run_job(job_id: str) -> None:
         # Build individual CSV attachments with metadata headers
         if table_panels_data:
             today = date.today().strftime("%Y-%m-%d")
-            os.makedirs("output", exist_ok=True)
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
             for item in table_panels_data:
                 safe_title = (item["panel"]["title"]
                              .replace(" ", "_").replace("/", "-"))
-                csv_path = os.path.join("output", f"{safe_title}_{today}.csv")
+                csv_path = str(OUTPUT_DIR / f"{safe_title}_{today}.csv")
 
                 dash_json = item.get("dashboard_json", {})
                 dashboard = dash_json.get("dashboard", {})

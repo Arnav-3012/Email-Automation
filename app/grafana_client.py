@@ -25,12 +25,27 @@ def _get_session() -> requests.Session:
 
 
 def _get(path: str, params: dict = None) -> any:
-    """GET {base_url}{path} and return parsed JSON. Raises GrafanaConnectionError on any failure."""
+    """GET {base_url}{path} and return parsed JSON. Raises GrafanaConnectionError on any failure.
+
+    If the X-Grafana-Org-Id header is rejected (401/403) — which can happen against
+    older Grafana 9.x servers — automatically retries once with ?orgId= as a query
+    param before giving up.
+    """
     settings = config_manager.get_grafana_settings()
     base_url = settings.get("url", "").rstrip("/")
     session = _get_session()
+    org_id = settings.get("org_id", 1)
     try:
         resp = session.get(f"{base_url}{path}", params=params, timeout=10)
+
+        # If header-based org switching failed, retry with query param
+        if resp.status_code in (401, 403) and org_id != 1:
+            retry_params = dict(params) if params else {}
+            retry_params["orgId"] = org_id
+            resp = session.get(
+                f"{base_url}{path}", params=retry_params, timeout=10
+            )
+
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError as e:
@@ -64,8 +79,20 @@ def execute_ds_query(payload: dict) -> dict:
 
 
 def test_connection() -> dict:
-    """Ping /api/health and return the response dict."""
-    return _get("/api/health")
+    """Ping /api/health, log the Grafana version, and return the response dict."""
+    result = _get("/api/health")
+    version = result.get("version", "unknown")
+    print(f"[grafana_client] Connected — Grafana version: {version}")
+    return result
+
+
+def get_grafana_version() -> str:
+    """Get Grafana server version for compatibility logging."""
+    try:
+        health = _get("/api/health")
+        return health.get("version", "unknown")
+    except Exception:
+        return "unknown"
 
 
 def get_organisations() -> list:

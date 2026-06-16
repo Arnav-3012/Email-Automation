@@ -1,10 +1,11 @@
 """Grafana panel screenshot taker — Chrome Selenium → Edge Selenium → mss fallback."""
 
+import logging
 import subprocess
 import time
 from io import BytesIO
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +25,69 @@ def _unavailable_png_bytes(width: int = 1000, height: int = 500) -> bytes:
 def _unavailable_png() -> list[bytes]:
     """Return the placeholder as a single-element list for consistency with screenshot returns."""
     return [_unavailable_png_bytes()]
+
+
+# ---------------------------------------------------------------------------
+# Whitespace trimming
+# ---------------------------------------------------------------------------
+
+def _trim_whitespace(png_bytes: bytes, aggressive: bool = True, min_padding: int = 5) -> bytes:
+    """Crop excess background border from a screenshot.
+
+    Detects the background colour from a thin border sample on all four edges,
+    then crops to the bounding box of everything that differs from it.
+
+    Args:
+        png_bytes: PNG image bytes.
+        aggressive: True for individual panels (tighter crop); False for full
+            dashboard overviews (preserve more padding around the layout).
+        min_padding: Minimum pixels of padding kept around the detected content,
+            to avoid clipping edge pixels.
+
+    Returns:
+        Trimmed PNG bytes, or the original bytes unchanged if trimming fails or
+        would remove more than half the image in either dimension.
+    """
+    try:
+        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+        original_size = img.size
+        w, h = img.size
+        border_width = 5
+
+        # Sample a thin border on all four edges to find the background colour.
+        edges = []
+        edges.extend(img.getpixel((x, y)) for x in range(w) for y in range(border_width))
+        edges.extend(img.getpixel((x, y)) for x in range(w) for y in range(max(0, h - border_width), h))
+        edges.extend(img.getpixel((x, y)) for x in range(border_width) for y in range(h))
+        edges.extend(img.getpixel((x, y)) for x in range(max(0, w - border_width), w) for y in range(h))
+        bg_color = max(set(edges), key=edges.count) if edges else (255, 255, 255)
+
+        bg = Image.new("RGB", img.size, bg_color)
+        diff = ImageChops.difference(img, bg)
+        bbox = diff.getbbox()
+        if not bbox:
+            return png_bytes
+
+        left, top, right, bottom = bbox
+        padding = max(min_padding, int((right - left) * (0.01 if aggressive else 0.03)))
+
+        left = max(0, left - padding)
+        top = max(0, top - padding)
+        right = min(img.width, right + padding)
+        bottom = min(img.height, bottom + padding)
+
+        # Safety check: don't let an over-eager crop remove more than half the image.
+        if (right - left) < original_size[0] * 0.5 or (bottom - top) < original_size[1] * 0.5:
+            return png_bytes
+
+        img = img.crop((left, top, right, bottom))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    except Exception as e:
+        logging.warning(f"[screenshot_taker] Whitespace trim failed: {e}, returning original screenshot")
+        return png_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +182,7 @@ def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: in
     width, height = img.size
 
     if height <= 2000:
-        return [png_bytes]
+        return [_trim_whitespace(png_bytes, aggressive=True, min_padding=5)]
 
     # Split tall images into 2000-px chunks
     chunks: list[bytes] = []
@@ -129,7 +193,7 @@ def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: in
         chunk.save(buf, format="PNG")
         chunks.append(buf.getvalue())
         y += 2000
-    return chunks
+    return [_trim_whitespace(chunk, aggressive=True, min_padding=5) for chunk in chunks]
 
 
 def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1) -> list[bytes]:
@@ -151,7 +215,8 @@ def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int, org_id: in
     subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
     buf = BytesIO()
     img.save(buf, format="PNG")
-    return [buf.getvalue()]
+    png_bytes = _trim_whitespace(buf.getvalue(), aggressive=True, min_padding=5)
+    return [png_bytes]
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +275,8 @@ def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
 
         driver.execute_script("window.scrollTo(0, 0)")
         time.sleep(0.5)
-        return driver.get_screenshot_as_png()
+        full_dashboard_bytes = driver.get_screenshot_as_png()
+        return _trim_whitespace(full_dashboard_bytes, aggressive=False, min_padding=10)
 
     except Exception as e:
         print(f"[screenshot_taker] Full dashboard screenshot failed: {e}", flush=True)

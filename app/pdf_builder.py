@@ -6,6 +6,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+# Anchored to the project root so it's correct regardless of the cwd the
+# process was launched from (mirrors config_manager.py / contact_manager.py).
+_DEFAULT_OUTPUT_DIR = str(Path(__file__).parent.parent / "output")
+
 from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -14,6 +18,7 @@ from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas as pdfcanvas
 from reportlab.platypus import (
+    CondPageBreak,
     Image,
     KeepTogether,
     PageBreak,
@@ -29,15 +34,54 @@ from reportlab.platypus import (
 # ---------------------------------------------------------------------------
 
 _PAGE_W, _PAGE_H = A4
-_MARGIN = 1.5 * cm                        # ~42 pt — tighter for more image area
-_CONTENT_W = _PAGE_W - 2 * _MARGIN        # ~510 pt
+_TOP_MARGIN = 0.5 * cm                    # tight — most pages are image-dominated
+_SIDE_MARGIN = 1 * cm                     # left/right
+_BOTTOM_MARGIN = 0.8 * cm                 # footer is drawn inside this margin
+_MARGIN = _SIDE_MARGIN                    # kept as an alias for left/right use below
+_CONTENT_W = _PAGE_W - 2 * _SIDE_MARGIN
 _FOOTER_Y = 0.45 * cm
-_BOTTOM_MARGIN = _MARGIN + 0.75 * cm      # ~63 pt — room for footer line
 
 # Height available to the image on a full overview page.
 # Reserves 16 pt for a single caption line above the image.
 _OVERVIEW_CAPTION_H = 16
-_OVERVIEW_IMG_H = _PAGE_H - _MARGIN - _BOTTOM_MARGIN - _OVERVIEW_CAPTION_H
+_OVERVIEW_IMG_H = _PAGE_H - _TOP_MARGIN - _BOTTOM_MARGIN - _OVERVIEW_CAPTION_H
+
+# Smart packing: only pack the next section/panel onto the current page if at
+# least this much vertical room is left — otherwise start a fresh page even
+# though it might technically fit. Prevents a chart being squeezed into a
+# sliver at the bottom of a page.
+_MIN_BREATHING_ROOM = _PAGE_H / 3
+
+# Gap between two DIFFERENT panels' images when packed on the same page.
+# (Smaller spacing is used between chunks of one tall image split in two —
+# those are fragments of a single screenshot, not separate panels.)
+_PACKED_IMAGE_SPACER = 12
+
+# Hard ceiling for a single panel image's height — a single full-page frame's
+# height, minus room for the rest of its KeepTogether block (title line +
+# the two trailing spacers in _panel_block). Without this cap, a tall/narrow
+# screenshot (e.g. a long table, or a max-height 2000px chunk from
+# screenshot_taker) scaled to full content width can end up TALLER than a
+# whole page, which reportlab can't lay out on any page and raises
+# LayoutError, killing the entire PDF build. Capping height here guarantees
+# the *whole* panel block (not just the image) fits on a fresh page;
+# CondPageBreak below decides whether it shares the current page or gets one
+# of its own.
+#
+# reportlab's Frame (used internally by SimpleDocTemplate) adds its own 6pt
+# top+bottom padding on top of the doc's topMargin/bottomMargin — that's not
+# visible in the doc margin constants above, so it must be subtracted here
+# too, or this cap overshoots the real usable height by 12pt. Confirmed via
+# Frame.__init__'s defaults (topPadding=6, bottomPadding=6) and by measuring
+# the actual LayoutError frame height reportlab reported when this was wrong.
+_FRAME_H = _PAGE_H - _TOP_MARGIN - _BOTTOM_MARGIN
+_FRAME_PADDING = 12   # reportlab Frame default: 6pt top + 6pt bottom
+_PANEL_TITLE_H = 19   # panel_title style: spaceBefore(7) + leading(10) + spaceAfter(2)
+_PANEL_TRAILING_SPACERS_H = 2 + _PACKED_IMAGE_SPACER
+_SAFETY_MARGIN = 4    # cushion against rounding at the exact boundary
+_MAX_PANEL_IMG_H = (
+    _FRAME_H - _FRAME_PADDING - _PANEL_TITLE_H - _PANEL_TRAILING_SPACERS_H - _SAFETY_MARGIN
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +92,7 @@ def build(
     job_config: dict[str, Any],
     panels_data: list[dict[str, Any]],
     dashboard_screenshots: dict[str, bytes | None] | None = None,
-    output_dir: str = "output/",
+    output_dir: str = _DEFAULT_OUTPUT_DIR,
 ) -> str:
     """Build a PDF from job config and panel screenshots.
 
@@ -103,7 +147,7 @@ def _build_single_page(
     """Render all panels on one A4 page, images scaled equally to fill height."""
     c = pdfcanvas.Canvas(out_path, pagesize=A4)
 
-    y = _PAGE_H - _MARGIN
+    y = _PAGE_H - _TOP_MARGIN
 
     c.setFont("Helvetica-Bold", 15)
     c.setFillColor(colors.black)
@@ -171,9 +215,9 @@ def _build_multi_page(
     doc = SimpleDocTemplate(
         out_path,
         pagesize=A4,
-        leftMargin=_MARGIN,
-        rightMargin=_MARGIN,
-        topMargin=_MARGIN,
+        leftMargin=_SIDE_MARGIN,
+        rightMargin=_SIDE_MARGIN,
+        topMargin=_TOP_MARGIN,
         bottomMargin=_BOTTOM_MARGIN,
         title=_resolve_title(job_config, today),
         author="Grafana Reporter",
@@ -264,7 +308,11 @@ def _content_pages(
     styles: dict[str, ParagraphStyle],
     dashboard_screenshots: dict[str, bytes | None] | None = None,
 ) -> list:
-    """Build the full story: for each dashboard, overview page then panel detail."""
+    """Build the full story: for each dashboard, overview page then panel detail.
+
+    Panels pack multiple-per-page when there's comfortable room (smart
+    packing — see _MIN_BREATHING_ROOM) and start a fresh page otherwise.
+    """
     story: list = []
     shots = dashboard_screenshots or {}
 
@@ -290,9 +338,18 @@ def _content_pages(
         if full_png:
             story.extend(_overview_page(full_png, group["title"], group["folder_path"], styles))
 
+        # Don't start a section header unless there's comfortable room left
+        # for it — avoids an orphaned header with no panel below it.
+        story.append(CondPageBreak(_MIN_BREATHING_ROOM))
+
         # Panel detail section
         story.extend(_section_header(group["title"], group["folder_path"], styles))
-        for panel in group["panels"]:
+        for i, panel in enumerate(group["panels"]):
+            if i > 0:
+                # Pack this panel onto the current page only if comfortable
+                # room remains; KeepTogether below still catches the case
+                # where it doesn't fit at all even with room to spare.
+                story.append(CondPageBreak(_MIN_BREATHING_ROOM))
             story.append(_panel_block(panel, styles))
 
     return story
@@ -354,8 +411,8 @@ def _panel_block(
     for png_bytes in (panel.get("screenshot") or []):
         img_obj = _make_image(png_bytes)
         elements.append(img_obj)
-        elements.append(Spacer(1, 3))
-    elements.append(Spacer(1, 0.2 * cm))
+        elements.append(Spacer(1, 2))  # seam between chunks of one split image
+    elements.append(Spacer(1, _PACKED_IMAGE_SPACER))  # gap before the next panel
     return KeepTogether(elements)
 
 
@@ -377,13 +434,13 @@ def _make_overview_image(png_bytes: bytes) -> Image | None:
 
 
 def _make_image(png_bytes: bytes) -> Image | Spacer:
-    """Scale PNG to full content width, preserving aspect ratio."""
+    """Scale PNG to content width, capped to never exceed one page's height."""
     if not png_bytes:
         return Spacer(1, 0.1 * cm)
     try:
         pil_img = PILImage.open(io.BytesIO(png_bytes))
         pw, ph = pil_img.size
-        img_h = _CONTENT_W * (ph / pw)
-        return Image(io.BytesIO(png_bytes), width=_CONTENT_W, height=img_h)
+        scale = min(_CONTENT_W / pw, _MAX_PANEL_IMG_H / ph)
+        return Image(io.BytesIO(png_bytes), width=pw * scale, height=ph * scale)
     except Exception:
         return Spacer(1, 0.1 * cm)

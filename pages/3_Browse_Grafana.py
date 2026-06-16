@@ -6,11 +6,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 from app import grafana_client, config_manager
+from app.auth_manager import require_auth
 from app.grafana_client import GrafanaConnectionError
 
-st.set_page_config(
-    page_title="Browse Grafana", page_icon="📂", layout="wide"
-)
+require_auth(page_title="Browse Grafana", page_icon="📂")
 st.title("Browse Grafana")
 st.caption("Select org → folder → subfolder → dashboard → panels.")
 
