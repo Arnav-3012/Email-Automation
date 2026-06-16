@@ -243,6 +243,18 @@ with right_col:
                         "panels": checked_ids,
                     })
                     st.session_state["job_draft_dashboards"] = existing
+
+                    # Remember the actual Grafana titles so New Job can
+                    # pre-fill (and let the user override) the job name,
+                    # dashboard header, and each panel's display name —
+                    # without re-fetching from Grafana on that page.
+                    st.session_state["selected_dashboard_title"] = selected["title"]
+                    panel_titles = st.session_state.get("selected_panel_titles", {})
+                    for panel in panels:
+                        if panel["id"] in checked_ids:
+                            panel_titles[f"{selected['uid']}_{panel['id']}"] = panel["title"]
+                    st.session_state["selected_panel_titles"] = panel_titles
+
                     st.success(
                         f"Added {len(checked_ids)} panel"
                         f"{'s' if len(checked_ids) != 1 else ''} "

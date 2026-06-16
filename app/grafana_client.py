@@ -232,7 +232,10 @@ def get_panels(dashboard_json: dict) -> list:
 
         panels.append({
             "id": panel.get("id"),
-            "title": panel.get("title", "Untitled"),
+            # Fall back to a numbered name rather than "Untitled" so two
+            # untitled panels in the same dashboard stay distinguishable
+            # wherever this title is shown (panel picker, job form, PDF).
+            "title": panel.get("title") or f"Panel {panel.get('id')}",
             "type": panel.get("type", ""),
             "description": panel.get("description", ""),
             "datasource_uid": panel_ds.get("uid", ""),
@@ -246,3 +249,21 @@ def get_panels(dashboard_json: dict) -> list:
 def get_datasources() -> list:
     """Return all configured datasources (used to resolve MySQL datasource UID)."""
     return _get("/api/datasources")
+
+
+# ---------------------------------------------------------------------------
+# Title lookups — used to pre-fill display-name fields in the job form
+# ---------------------------------------------------------------------------
+
+def get_dashboard_title(dashboard_uid: str) -> str:
+    """Return a dashboard's Grafana title, falling back to its UID if untitled."""
+    dashboard_json = get_dashboard(dashboard_uid)
+    title = dashboard_json.get("dashboard", {}).get("title", "")
+    return title or dashboard_uid
+
+
+def get_panel_title(dashboard_uid: str, panel_id: int) -> str:
+    """Return a single panel's title, falling back to 'Panel {id}' if untitled or not found."""
+    panels = get_panels(get_dashboard(dashboard_uid))
+    panel = next((p for p in panels if p["id"] == panel_id), None)
+    return panel["title"] if panel else f"Panel {panel_id}"

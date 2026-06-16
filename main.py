@@ -4,10 +4,10 @@ import streamlit as st
 
 from app import scheduler
 from app.auth_manager import (
+    has_users,
     initialize_users,
     log_event,
     render_user_sidebar,
-    users_file_exists,
     validate_password,
     verify_login,
 )
@@ -18,10 +18,11 @@ if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
 # ---------------------------------------------------------------------------
-# Setup wizard — first run only (no app_users.json yet)
+# Setup wizard — first run only (no users yet, whether app_users.json is
+# missing entirely or exists with an empty "users" list)
 # ---------------------------------------------------------------------------
 
-if not users_file_exists():
+if not has_users():
     st.set_page_config(page_title="Grafana Reporter - Setup", page_icon="⚙️", layout="centered")
     st.title("⚙️ Grafana Reporter - First Setup")
     st.markdown("Create your admin account to get started.")

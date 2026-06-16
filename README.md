@@ -4,6 +4,31 @@ A local automation tool that pulls data from a Grafana instance, generates PDF r
 
 ---
 
+## What is this, in plain English?
+
+Picture someone whose job is: log into Grafana (a charts/dashboards tool) every morning, take screenshots of a few charts, paste them into a nicely formatted document, and email that document to a list of people. Every single day, by hand.
+
+This app *is* that person, automated. You set it up once, and from then on it does the boring part by itself.
+
+**What you do (once, in a simple webpage — no coding):**
+1. Tell it which Grafana charts/dashboards you care about.
+2. Tell it who should get the report (name + email).
+3. Tell it how often — every day, every week, or once a month — and at what time.
+
+**What it does, automatically, forever after:**
+- Logs into Grafana and takes clean screenshots of exactly the charts you picked.
+- Assembles them into a polished PDF report (and a spreadsheet/CSV file too, for any data tables).
+- Emails the finished report to your list of people, right on schedule.
+- Keeps a record of when it ran and whether it succeeded, so you can check up on it.
+
+**Where you interact with it:** a simple webpage that opens in your normal browser (Chrome, Edge, etc.) — there's a login screen, then a few clear pages: pick your charts, pick your people, pick your schedule, done. You never need to write code or touch a command line to use it day-to-day.
+
+**The one thing to remember:** this only works while the program is left running on the computer it's installed on — like a printer that only prints while it's switched on. If that computer (or the program window/terminal) is shut down, the scheduled emails simply won't go out until it's started again.
+
+The rest of this document is the full technical reference — useful once you're setting it up or troubleshooting, but not required reading just to use the app day-to-day.
+
+---
+
 ## What it does
 
 - Connects to any Grafana instance on your network using Basic Auth (username/password), with multi-organisation support
@@ -101,7 +126,7 @@ python runner.py --job job_001
 
 ## First-time setup & authentication
 
-The app is gated behind a login. On the very first launch — before `app_users.json` exists — Streamlit shows a one-time **setup wizard** instead of the login form:
+The app is gated behind a login. Whenever no user account exists yet — `app_users.json` is missing entirely, or it exists but its `users` list is empty — Streamlit shows a one-time **setup wizard** instead of the login form:
 
 1. Choose a username and password (8–72 characters; bcrypt has a hard 72-character limit).
 2. Submitting creates the first account with the `admin` role and logs you in immediately.
@@ -317,7 +342,7 @@ grafana_reporter/
     └── contact_manager.py     # contacts.json read/write
 ```
 
-Every module that persists a file anchors its path to the project root via `Path(__file__).parent[.parent]` rather than a relative string — this is intentional and load-bearing: it means the app behaves identically regardless of the working directory the process was launched from (a shortcut, a Task Scheduler entry, a different shell), with one exception noted under [Known limitations](#known-limitations) below.
+Every module that persists a file anchors its path to the project root via `Path(__file__).parent[.parent]` rather than a relative string — this is intentional and load-bearing: it means the app behaves identically regardless of the working directory the process was launched from (a shortcut, a Task Scheduler entry, a different shell). `pdf_builder.py`'s default output directory follows this same pattern (see its top-of-file comment) — there is no remaining exception.
 
 ---
 
@@ -329,5 +354,4 @@ Every module that persists a file anchors its path to the project root via `Path
 - **Single Outlook profile** — on Windows, `win32com` uses whichever Outlook profile is currently open. Multiple accounts are not handled.
 - **LAN only** — the app assumes Grafana is reachable on a private network. No proxy or VPN configuration is built in.
 - **No brute-force protection on login**, and **no file-locking** around concurrent writes to the JSON data files — both acceptable for the single-PC, low-concurrency use case this targets, but worth knowing before relying on this for anything higher-stakes.
-- **One pre-existing relative path**: `app/pdf_builder.py`'s single-dashboard-no-overview rendering path and the rest of the codebase are anchored to the project root, but this has not been re-verified after every recent change — if you see a report or CSV land in an unexpected `output/` folder, check the cwd the process was actually launched from first.
 - **`config.example.json` is currently out of sync** with the real config schema (lists a non-existent `api_key` field, missing `org_id` and `tls_mode`) — use the schema documented in [Configuration](#configuration) above, not that file, until it's updated.

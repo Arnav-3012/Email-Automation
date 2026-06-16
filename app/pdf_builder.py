@@ -361,20 +361,24 @@ def _overview_page(
     folder_path: str,
     styles: dict[str, ParagraphStyle],
 ) -> list:
-    """Single-line caption then the full dashboard image filling the page."""
+    """Single-line caption then the full dashboard image filling the page.
+
+    title may be a deliberately blank user override ("no header label") —
+    in that case the caption line is skipped entirely rather than rendered
+    empty, falling back to just the folder path if there is one.
+    """
     img_obj = _make_overview_image(full_png)
     if img_obj is None:
         return []
 
-    caption_parts = [title]
-    if folder_path:
-        caption_parts.append(folder_path)
+    caption_parts = [p for p in (title, folder_path) if p]
 
-    return [
-        Paragraph("  ·  ".join(caption_parts), styles["overview_caption"]),
-        img_obj,
-        PageBreak(),
-    ]
+    elements: list = []
+    if caption_parts:
+        elements.append(Paragraph("  ·  ".join(caption_parts), styles["overview_caption"]))
+    elements.append(img_obj)
+    elements.append(PageBreak())
+    return elements
 
 
 def _section_header(
@@ -406,8 +410,15 @@ def _panel_block(
     panel: dict[str, Any],
     styles: dict[str, ParagraphStyle],
 ) -> KeepTogether:
-    """Panel title followed by all screenshot chunks, kept together."""
-    elements: list = [Paragraph(panel.get("panel_title", "Panel"), styles["panel_title"])]
+    """Panel title followed by all screenshot chunks, kept together.
+
+    panel_title may be a deliberately blank user override ("no header
+    label") — in that case no title line is rendered, just the screenshot.
+    """
+    elements: list = []
+    panel_title = panel.get("panel_title", "")
+    if panel_title:
+        elements.append(Paragraph(panel_title, styles["panel_title"]))
     for png_bytes in (panel.get("screenshot") or []):
         img_obj = _make_image(png_bytes)
         elements.append(img_obj)

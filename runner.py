@@ -31,6 +31,20 @@ def _log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
+def _resolve_title(overrides: dict[str, str], key: str, fallback: str) -> str:
+    """Resolve a display name with explicit-override (blank-aware) semantics.
+
+    A *present* key always wins, even if its value is "" — that means the
+    user saw the field pre-filled in the job form and deliberately cleared
+    it, so an empty header is what they asked for. Only a *missing* key
+    (jobs saved before display-name pre-fill existed) falls back to the
+    real Grafana title.
+    """
+    if key in overrides:
+        return overrides[key]
+    return fallback
+
+
 def run_job(job_id: str) -> None:
     """Execute a single reporter job end-to-end.
 
@@ -47,6 +61,7 @@ def run_job(job_id: str) -> None:
     grafana_settings = config_manager.get_grafana_settings()
     recipients = contact_manager.resolve_ids(job.get("recipient_ids", []))
     panel_names = job.get("panel_names", {})
+    dashboard_names = job.get("dashboard_names", {})
 
     attachments: list[str] = []
     panels_data: list[dict[str, Any]] = []       # chart panels → PDF
@@ -60,10 +75,12 @@ def run_job(job_id: str) -> None:
             _log(f"Fetching dashboard: {dashboard.get('title', uid)}")
 
             dashboard_json = grafana_client.get_dashboard(uid)
-            dashboard_title: str = (
+            grafana_dashboard_title = (
                 dashboard_json.get("dashboard", {}).get("title")
-                or dashboard.get("title", uid)
+                or dashboard.get("title")
+                or uid
             )
+            dashboard_title: str = _resolve_title(dashboard_names, uid, grafana_dashboard_title)
             all_panels = grafana_client.get_panels(dashboard_json)
             selected = [p for p in all_panels if p["id"] in panel_ids]
             chart_panels = [p for p in selected if p.get("type") not in TABLE_TYPES]
@@ -84,13 +101,16 @@ def run_job(job_id: str) -> None:
                 chart_ids = [p["id"] for p in chart_panels]
                 screenshots = screenshot_taker.capture_panels(uid, chart_ids, grafana_settings)
                 for panel in chart_panels:
-                    custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
+                    panel_title = _resolve_title(
+                        panel_names, f"{uid}_{panel['id']}",
+                        panel.get("title", f"Panel {panel['id']}"),
+                    )
                     panels_data.append({
                         "dashboard_uid": uid,
                         "dashboard_title": dashboard_title,
                         "folder_path": dashboard.get("folder_path", ""),
                         "panel_id": panel["id"],
-                        "panel_title": custom_name if custom_name else panel.get("title", f"Panel {panel['id']}"),
+                        "panel_title": panel_title,
                         "screenshot": screenshots.get(panel["id"], screenshot_taker._unavailable_png()),
                     })
 
@@ -99,13 +119,16 @@ def run_job(job_id: str) -> None:
                 table_ids = [p["id"] for p in table_panels]
                 table_screenshots = screenshot_taker.capture_panels(uid, table_ids, grafana_settings)
                 for panel in table_panels:
-                    custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
+                    panel_title = _resolve_title(
+                        panel_names, f"{uid}_{panel['id']}",
+                        panel.get("title", f"Panel {panel['id']}"),
+                    )
                     panels_data.append({
                         "dashboard_uid": uid,
                         "dashboard_title": dashboard_title,
                         "folder_path": dashboard.get("folder_path", ""),
                         "panel_id": panel["id"],
-                        "panel_title": custom_name if custom_name else panel.get("title", f"Panel {panel['id']}"),
+                        "panel_title": panel_title,
                         "screenshot": table_screenshots.get(panel["id"], screenshot_taker._unavailable_png()),
                     })
 
@@ -114,11 +137,13 @@ def run_job(job_id: str) -> None:
                 try:
                     df = data_fetcher.fetch_panel_data(panel, grafana_client)
                     if df is not None and not df.empty:
-                        custom_name = panel_names.get(f"{uid}_{panel['id']}", "")
+                        panel_title = _resolve_title(
+                            panel_names, f"{uid}_{panel['id']}", panel["title"]
+                        )
                         table_panels_data.append({
                             "panel": {
                                 **panel,
-                                "title": custom_name if custom_name else panel["title"],
+                                "title": panel_title,
                             },
                             "dashboard_title": dashboard_title,
                             "folder_path": dashboard.get("folder_path", ""),
@@ -145,8 +170,11 @@ def run_job(job_id: str) -> None:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
             for item in table_panels_data:
-                safe_title = (item["panel"]["title"]
-                             .replace(" ", "_").replace("/", "-"))
+                # The display name can be deliberately blank (user cleared
+                # it for "no header label"), but a filename can't be — fall
+                # back to the panel id so the CSV still gets a sane name.
+                filename_base = item["panel"]["title"] or f"panel_{item['panel']['id']}"
+                safe_title = filename_base.replace(" ", "_").replace("/", "-")
                 csv_path = str(OUTPUT_DIR / f"{safe_title}_{today}.csv")
 
                 dash_json = item.get("dashboard_json", {})

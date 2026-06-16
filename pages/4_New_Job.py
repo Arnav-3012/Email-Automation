@@ -9,10 +9,50 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 
-from app import config_manager, contact_manager, scheduler
-from app.auth_manager import require_auth
+from app import config_manager, contact_manager, grafana_client, scheduler
+from app.auth_manager import get_user, require_auth
 
 require_auth(page_title="New Job", page_icon="➕")
+
+current_user: str = st.session_state.current_user
+current_role: str = (get_user(current_user) or {}).get("role", "user")
+is_admin = current_role == "admin"
+
+
+# ---------------------------------------------------------------------------
+# Display-name pre-fill helpers
+# ---------------------------------------------------------------------------
+#
+# Both helpers follow the same priority order: a name already saved on this
+# job (covers re-opening a job whose names were previously edited, or
+# deliberately blanked) > the real Grafana title we have on hand > a generic
+# fallback. Used both to seed session_state once (edit-mode init below) and
+# inline in the form sections further down.
+
+def _initial_panel_name(dash_uid: str, panel_id: int, saved_names: dict) -> str:
+    """Pre-fill value for one panel's display-name field."""
+    composite_key = f"{dash_uid}_{panel_id}"
+    if composite_key in saved_names:
+        return saved_names[composite_key]
+
+    cached_titles = st.session_state.get("selected_panel_titles", {})
+    if composite_key in cached_titles:
+        return cached_titles[composite_key]
+
+    # Last resort — e.g. editing an older job in a fresh session where we
+    # never captured this panel's title via Browse Grafana this time round.
+    try:
+        return grafana_client.get_panel_title(dash_uid, panel_id)
+    except Exception:
+        return f"Panel {panel_id}"
+
+
+def _initial_dashboard_name(dash_uid: str, fallback_title: str, saved_names: dict) -> str:
+    """Pre-fill value for one dashboard's PDF header-name field."""
+    if dash_uid in saved_names:
+        return saved_names[dash_uid]
+    return fallback_title or dash_uid
+
 
 # ---------------------------------------------------------------------------
 # Edit mode detection
@@ -24,6 +64,16 @@ _existing_job: dict = {}
 
 if _edit_mode and _edit_job_id:
     _existing_job = config_manager.get_job(_edit_job_id) or {}
+
+    # Ownership gate. The Dashboard page already hides the Edit button for
+    # jobs a regular user doesn't own, but this page is reachable directly
+    # via session state, so the rule has to be enforced here too, not just
+    # there.
+    _job_owner = _existing_job.get("created_by", "")
+    if _existing_job and not is_admin and _job_owner != current_user:
+        st.error("🚫 You can only edit your own jobs.")
+        st.stop()
+
     st.title("Edit Job")
     # Initialise form state once per edit session (guard against repeated reruns)
     if st.session_state.get("edit_initialized_for") != _edit_job_id:
@@ -31,11 +81,15 @@ if _edit_mode and _edit_job_id:
         st.session_state["email_subject"] = _existing_job.get("email_subject", "")
         st.session_state["email_message"] = _existing_job.get("email_message", "")
         _saved_panel_names = _existing_job.get("panel_names", {})
+        _saved_dashboard_names = _existing_job.get("dashboard_names", {})
         for _dash in _existing_job.get("dashboards", []):
             _dash_uid = _dash.get("uid", "")
+            st.session_state[f"dash_display_name_{_dash_uid}"] = _initial_dashboard_name(
+                _dash_uid, _dash.get("title", _dash_uid), _saved_dashboard_names
+            )
             for _pid in _dash.get("panels", []):
-                st.session_state[f"panel_name_{_dash_uid}_{_pid}"] = (
-                    _saved_panel_names.get(f"{_dash_uid}_{_pid}", "")
+                st.session_state[f"panel_name_{_dash_uid}_{_pid}"] = _initial_panel_name(
+                    _dash_uid, _pid, _saved_panel_names
                 )
         st.session_state["edit_initialized_for"] = _edit_job_id
 else:
@@ -47,7 +101,13 @@ else:
 
 st.subheader("Job Details")
 
-job_name = st.text_input("Job Name", value=_existing_job.get("name", ""))
+# New jobs default to the dashboard title just selected in Browse Grafana
+# (saves typing for the common case); editing a job always shows its saved
+# name. Either way it's a plain editable field — type over it freely.
+_default_job_name = _existing_job.get("name", "") or st.session_state.get(
+    "selected_dashboard_title", ""
+)
+job_name = st.text_input("Job Name", value=_default_job_name)
 pdf_title = st.text_input("PDF Title", value=_existing_job.get("pdf_title", ""))
 st.caption("Use {date} for today's date — e.g. Finance Summary – {date}")
 
@@ -99,16 +159,28 @@ st.divider()
 st.subheader("Dashboards & Panels")
 
 draft_dashboards: list = st.session_state.get("job_draft_dashboards", [])
+_saved_dashboard_names = _existing_job.get("dashboard_names", {})
 
 if not draft_dashboards:
     st.info("No dashboards added yet. Use Browse Grafana in the sidebar to pick panels.")
 else:
     for entry in draft_dashboards:
         n = len(entry.get("panels", []))
+        dash_uid = entry.get("uid", "")
         st.info(
             f"**{entry['title']}**  \n"
             f"{entry.get('folder_path', '')}  \n"
             f"{n} panel{'s' if n != 1 else ''} selected"
+        )
+
+        dash_name_key = f"dash_display_name_{dash_uid}"
+        st.session_state.setdefault(
+            dash_name_key,
+            _initial_dashboard_name(dash_uid, entry.get("title", dash_uid), _saved_dashboard_names),
+        )
+        st.text_input(
+            "Header name in PDF (pre-filled from Grafana — edit or clear for no header line)",
+            key=dash_name_key,
         )
 
     if st.button("Clear all"):
@@ -162,7 +234,12 @@ st.text_area(
     height=100,
 )
 
-st.caption("Custom panel names (optional) — rename panels as they appear in the email and PDF")
+st.caption(
+    "Panel display names — pre-filled from Grafana, as they'll appear in the email and PDF. "
+    "Edit any of them, or clear one for no header label on that panel."
+)
+
+_saved_panel_names = _existing_job.get("panel_names", {})
 
 for dash_entry in draft_dashboards:
     panel_ids = dash_entry.get("panels", [])
@@ -171,10 +248,11 @@ for dash_entry in draft_dashboards:
         st.write(f"*{dash_entry['title']}*")
         for panel_id in panel_ids:
             unique_key = f"panel_name_{dash_uid}_{panel_id}"
-            st.session_state.setdefault(unique_key, "")
+            st.session_state.setdefault(
+                unique_key, _initial_panel_name(dash_uid, panel_id, _saved_panel_names)
+            )
             st.text_input(
                 f"Panel {panel_id} display name",
-                placeholder="Leave blank to use Grafana panel title",
                 key=unique_key,
             )
 
@@ -199,14 +277,22 @@ if st.button(save_label, type="primary"):
         st.error(err)
 
     if not errors:
+        # Every dashboard/panel on this form had a visible, pre-filled
+        # field the user could see and edit — so we always save its
+        # current value, blank or not. A blank value is a deliberate "no
+        # header label", not "no opinion, fall back to Grafana's title";
+        # only an entirely missing key (legacy jobs saved before this
+        # feature existed) means the latter. See runner.py.
         panel_names: dict = {}
+        dashboard_names: dict = {}
         for dash_entry in draft_dashboards:
             dash_uid = dash_entry.get("uid", "")
+            dashboard_names[dash_uid] = st.session_state.get(
+                f"dash_display_name_{dash_uid}", dash_entry.get("title", dash_uid)
+            ).strip()
             for panel_id in dash_entry.get("panels", []):
                 unique_key = f"panel_name_{dash_uid}_{panel_id}"
-                custom = st.session_state.get(unique_key, "").strip()
-                if custom:
-                    panel_names[f"{dash_uid}_{panel_id}"] = custom
+                panel_names[f"{dash_uid}_{panel_id}"] = st.session_state.get(unique_key, "").strip()
 
         shared_fields = {
             "name": job_name.strip(),
@@ -229,9 +315,13 @@ if st.button(save_label, type="primary"):
             "email_subject": st.session_state.get("email_subject", "").strip(),
             "email_message": st.session_state.get("email_message", "").strip(),
             "panel_names": panel_names,
+            "dashboard_names": dashboard_names,
         }
 
         if _edit_mode and _edit_job_id:
+            # created_by is intentionally NOT in shared_fields, so the
+            # original creator is preserved even when an admin edits
+            # someone else's job — editing never silently reassigns it.
             job = {**_existing_job, **shared_fields}
         else:
             job = {
@@ -239,6 +329,7 @@ if st.button(save_label, type="primary"):
                 "status": "active",
                 "last_run": None,
                 "last_status": None,
+                "created_by": current_user,
                 **shared_fields,
             }
 
@@ -253,7 +344,11 @@ if st.button(save_label, type="primary"):
         # Clear draft and email option state
         st.session_state["job_draft_dashboards"] = []
         for key in list(st.session_state.keys()):
-            if key in ("email_subject", "email_message") or key.startswith("panel_name_"):
+            if (
+                key in ("email_subject", "email_message")
+                or key.startswith("panel_name_")
+                or key.startswith("dash_display_name_")
+            ):
                 del st.session_state[key]
 
         verb = "updated" if _edit_mode else "saved and scheduled"

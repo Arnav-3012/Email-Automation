@@ -62,9 +62,14 @@ def save_users(users: dict[str, Any]) -> None:
         json.dump(users, f, indent=2)
 
 
-def users_file_exists() -> bool:
-    """True once at least one admin account has been created."""
-    return USERS_FILE.exists()
+def has_users() -> bool:
+    """True if at least one user account exists.
+
+    Covers both first-run cases: the file is missing entirely, or it exists
+    but its "users" list is empty (e.g. left over from a wiped/reset setup).
+    Either way the setup wizard should show instead of the login form.
+    """
+    return len(load_users().get("users", [])) > 0
 
 
 def verify_login(username: str, password: str) -> bool:
