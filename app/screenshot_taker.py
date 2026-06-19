@@ -7,6 +7,22 @@ from io import BytesIO
 
 from PIL import Image, ImageChops, ImageDraw
 
+logger = logging.getLogger(__name__)
+
+
+def _is_debug() -> bool:
+    try:
+        from app import config_manager
+        return bool(config_manager.get_debug_mode())
+    except Exception:
+        return False
+
+
+def _dbg(msg: str) -> None:
+    if _is_debug():
+        logger.debug(msg)
+        print(f"[DEBUG] {msg}", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Placeholder image
@@ -307,24 +323,30 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
     # Level 1 — Chrome Selenium
     try:
         print("[screenshot_taker] Trying Chrome Selenium...", flush=True)
+        _dbg(f"capture_panels: attempting Chrome Selenium for dashboard={dashboard_uid} panels={panel_ids} org_id={org_id}")
         driver = _get_chrome_driver()
         _login(driver, base_url, username, password)
         method = "Chrome"
         print("[screenshot_taker] Chrome Selenium OK", flush=True)
+        _dbg("capture_panels: Chrome Selenium driver ready")
     except Exception as e:
         print(f"[screenshot_taker] Chrome Selenium failed: {e}", flush=True)
+        _dbg(f"capture_panels: Chrome Selenium failed ({e}), will try Edge")
         driver = None
 
     # Level 2 — Edge Selenium
     if driver is None:
         try:
             print("[screenshot_taker] Trying Edge Selenium...", flush=True)
+            _dbg("capture_panels: attempting Edge Selenium")
             driver = _get_edge_driver()
             _login(driver, base_url, username, password)
             method = "Edge"
             print("[screenshot_taker] Edge Selenium OK", flush=True)
+            _dbg("capture_panels: Edge Selenium driver ready")
         except Exception as e:
             print(f"[screenshot_taker] Edge Selenium failed: {e}", flush=True)
+            _dbg(f"capture_panels: Edge Selenium failed ({e}), will try mss")
             driver = None
 
     # Selenium path (Chrome or Edge)
@@ -332,11 +354,14 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
         try:
             for panel_id in panel_ids:
                 try:
+                    _dbg(f"capture_panels: screenshotting panel_id={panel_id} via {method}")
                     chunks = _selenium_screenshot(driver, base_url, dashboard_uid, panel_id, org_id)
                     results[panel_id] = chunks
                     print(f"[screenshot_taker] Panel {panel_id} captured via {method} ({len(chunks)} chunk(s))", flush=True)
+                    _dbg(f"capture_panels: panel_id={panel_id} OK — {len(chunks)} chunk(s)")
                 except Exception as e:
                     print(f"[screenshot_taker] Panel {panel_id} failed: {e}", flush=True)
+                    _dbg(f"capture_panels: panel_id={panel_id} failed via {method}: {e} — using placeholder")
                     results[panel_id] = _unavailable_png()
         finally:
             try:
@@ -347,13 +372,17 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
 
     # Level 3 — mss screen capture
     print("[screenshot_taker] Selenium blocked, trying mss screen capture...", flush=True)
+    _dbg("capture_panels: falling back to mss screen capture (Selenium unavailable)")
     for panel_id in panel_ids:
         try:
+            _dbg(f"capture_panels: mss capturing panel_id={panel_id}")
             chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id)
             results[panel_id] = chunks
             print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
+            _dbg(f"capture_panels: panel_id={panel_id} OK via mss")
         except Exception as e:
             print(f"[screenshot_taker] Panel {panel_id} mss failed: {e}", flush=True)
+            _dbg(f"capture_panels: panel_id={panel_id} mss failed: {e} — using placeholder")
             results[panel_id] = _unavailable_png()
 
     return results

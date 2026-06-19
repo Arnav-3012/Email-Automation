@@ -16,6 +16,7 @@ from app import (
     pdf_builder,
     screenshot_taker,
 )
+from app.auth_manager import get_grafana_credentials
 
 TABLE_TYPES = {"table", "datagrid", "table-old"}
 
@@ -59,6 +60,27 @@ def run_job(job_id: str) -> None:
 
     _log(f"Starting job: {job['name']}")
     grafana_settings = config_manager.get_grafana_settings()
+
+    # Always use the job creator's Grafana credentials (with fallback to global).
+    # This applies regardless of who triggered Run Now — admin or the creator.
+    creator = job.get("created_by", "")
+    credentials = get_grafana_credentials(creator) if creator else None
+    if not credentials or not credentials.get("grafana_username"):
+        _log(f"Job FAILED: creator '{creator}' has no Grafana credentials configured (personal or fallback)")
+        config_manager.update_job_run_status(
+            job_id,
+            last_run=datetime.now().isoformat(timespec="seconds"),
+            last_status="failed",
+        )
+        return
+    # Merge per-user credentials into grafana_settings for screenshot_taker
+    # (which needs the full settings dict including url/org_id).
+    grafana_settings_with_creds = {
+        **grafana_settings,
+        "username": credentials["grafana_username"],
+        "password": credentials["grafana_password"],
+    }
+
     recipients = contact_manager.resolve_ids(job.get("recipient_ids", []))
     panel_names = job.get("panel_names", {})
     dashboard_names = job.get("dashboard_names", {})
@@ -74,7 +96,7 @@ def run_job(job_id: str) -> None:
             panel_ids: list[int] = dashboard.get("panels", [])
             _log(f"Fetching dashboard: {dashboard.get('title', uid)}")
 
-            dashboard_json = grafana_client.get_dashboard(uid)
+            dashboard_json = grafana_client.get_dashboard(uid, credentials=credentials)
             grafana_dashboard_title = (
                 dashboard_json.get("dashboard", {}).get("title")
                 or dashboard.get("title")
@@ -89,7 +111,7 @@ def run_job(job_id: str) -> None:
             # Full dashboard overview screenshot
             try:
                 dashboard_screenshots[uid] = screenshot_taker.capture_full_dashboard(
-                    uid, grafana_settings
+                    uid, grafana_settings_with_creds
                 )
                 _log(f"Full dashboard captured: {dashboard.get('title', uid)}")
             except Exception as e:
@@ -99,7 +121,7 @@ def run_job(job_id: str) -> None:
             # Screenshots for chart panels
             if chart_panels:
                 chart_ids = [p["id"] for p in chart_panels]
-                screenshots = screenshot_taker.capture_panels(uid, chart_ids, grafana_settings)
+                screenshots = screenshot_taker.capture_panels(uid, chart_ids, grafana_settings_with_creds)
                 for panel in chart_panels:
                     panel_title = _resolve_title(
                         panel_names, f"{uid}_{panel['id']}",
@@ -117,7 +139,7 @@ def run_job(job_id: str) -> None:
             # Screenshots for table panels — added to PDF alongside chart panels
             if table_panels:
                 table_ids = [p["id"] for p in table_panels]
-                table_screenshots = screenshot_taker.capture_panels(uid, table_ids, grafana_settings)
+                table_screenshots = screenshot_taker.capture_panels(uid, table_ids, grafana_settings_with_creds)
                 for panel in table_panels:
                     panel_title = _resolve_title(
                         panel_names, f"{uid}_{panel['id']}",
@@ -135,7 +157,7 @@ def run_job(job_id: str) -> None:
             # Data fetch for table panels → CSV
             for panel in table_panels:
                 try:
-                    df = data_fetcher.fetch_panel_data(panel, grafana_client)
+                    df = data_fetcher.fetch_panel_data(panel, grafana_client, credentials=credentials)
                     if df is not None and not df.empty:
                         panel_title = _resolve_title(
                             panel_names, f"{uid}_{panel['id']}", panel["title"]

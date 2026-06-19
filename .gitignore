@@ -5,9 +5,11 @@ app_users.json
 CLAUDE.md
 
 audit_log.json
-
+CLAUDE.md
 # Generated output
 output/
+# Project assets (company logo, branding images)
+assets/
 
 # Python
 __pycache__/
