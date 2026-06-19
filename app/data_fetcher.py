@@ -1,5 +1,6 @@
 """Executes Grafana panel queries via /api/ds/query and returns pandas DataFrames."""
 
+import logging
 from types import ModuleType
 from typing import Any
 
@@ -7,12 +8,29 @@ import pandas as pd
 
 from app.grafana_client import GrafanaConnectionError
 
+logger = logging.getLogger(__name__)
+
+
+def _is_debug() -> bool:
+    try:
+        from app import config_manager
+        return bool(config_manager.get_debug_mode())
+    except Exception:
+        return False
+
+
+def _dbg(msg: str) -> None:
+    if _is_debug():
+        logger.debug(msg)
+        print(f"[DEBUG] {msg}", flush=True)
+
 
 def fetch_panel_data(
     panel_meta: dict[str, Any],
     grafana_client: ModuleType,
     time_from: str = "now-24h",
     time_to: str = "now",
+    credentials: dict = None,
 ) -> pd.DataFrame:
     """Query Grafana for a panel's data and return it as a DataFrame.
 
@@ -34,12 +52,15 @@ def fetch_panel_data(
         or (panel_meta.get("targets", [{}])[0].get("datasource", {}).get("uid", ""))
     )
 
+    _dbg(f"fetch_panel_data: panel='{panel_meta.get('title')}' ds_type={ds_type!r} ds_uid={ds_uid!r}")
     print(f"[data_fetcher] Panel '{panel_meta.get('title')}' datasource: {ds_type}")
 
     if "testdata" in ds_type or ds_uid == "-- Grafana --":
-        return _fetch_testdata(panel_meta, grafana_client, time_from, time_to)
+        _dbg("fetch_panel_data: routing to TestData fetcher")
+        return _fetch_testdata(panel_meta, grafana_client, time_from, time_to, credentials)
 
-    return _fetch_sql(panel_meta, grafana_client, time_from, time_to)
+    _dbg("fetch_panel_data: routing to SQL fetcher")
+    return _fetch_sql(panel_meta, grafana_client, time_from, time_to, credentials)
 
 
 def _fetch_testdata(
@@ -47,6 +68,7 @@ def _fetch_testdata(
     grafana_client: ModuleType,
     time_from: str,
     time_to: str,
+    credentials: dict = None,
 ) -> pd.DataFrame:
     """Fetch data from Grafana TestData datasource."""
     targets = panel_meta.get("targets", [])
@@ -76,11 +98,12 @@ def _fetch_testdata(
                 "to": time_to,
             }
 
-            response = grafana_client.execute_ds_query(payload)
+            response = grafana_client.execute_ds_query(payload, credentials=credentials)
             df = _parse_response(response, queries)
             if not df.empty:
                 all_frames.append(df)
         except Exception as e:
+            _dbg(f"_fetch_testdata: target {i} scenario={scenario!r} failed: {e}")
             print(f"[data_fetcher] TestData target {i} failed: {e}")
 
     if not all_frames:
@@ -93,6 +116,7 @@ def _fetch_sql(
     grafana_client: ModuleType,
     time_from: str,
     time_to: str,
+    credentials: dict = None,
 ) -> pd.DataFrame:
     """Fetch data from SQL datasource (MySQL, PostgreSQL etc)."""
     targets = panel_meta.get("targets", [])
@@ -111,9 +135,13 @@ def _fetch_sql(
     }
 
     try:
-        response = grafana_client.execute_ds_query(payload)
-        return _parse_response(response, queries)
+        _dbg(f"_fetch_sql: posting {len(queries)} query/queries to /api/ds/query")
+        response = grafana_client.execute_ds_query(payload, credentials=credentials)
+        result = _parse_response(response, queries)
+        _dbg(f"_fetch_sql: got DataFrame shape={result.shape}")
+        return result
     except Exception as e:
+        _dbg(f"_fetch_sql: failed: {e}")
         print(f"[data_fetcher] SQL fetch failed: {e}")
         return pd.DataFrame()
 

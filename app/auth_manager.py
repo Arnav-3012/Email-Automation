@@ -135,7 +135,11 @@ def change_password(username: str, old_password: str, new_password: str) -> bool
 
 
 def delete_user(username: str) -> bool:
-    """Remove a user. Refuses to delete the last remaining admin account."""
+    """Remove a user. Refuses to delete the last remaining admin account.
+
+    Also orphans any jobs created by the deleted user: marks them with
+    creator_deleted=True and sets their status to 'paused'.
+    """
     users = load_users()
     target = next((u for u in users["users"] if u["username"] == username), None)
     if not target:
@@ -148,7 +152,26 @@ def delete_user(username: str) -> bool:
             return False  # would lock everyone out
     users["users"] = [u for u in users["users"] if u["username"] != username]
     save_users(users)
+
+    # Orphan jobs whose creator is the deleted user
+    _orphan_jobs_for_deleted_user(username)
+
     return True
+
+
+def _orphan_jobs_for_deleted_user(username: str) -> None:
+    """Mark all jobs owned by a deleted user as orphaned and pause them."""
+    from app import config_manager
+    config = config_manager.load()
+    changed = False
+    for job in config.get("jobs", []):
+        if job.get("created_by") == username:
+            job["creator_deleted"] = True
+            job["status"] = "paused"
+            changed = True
+    if changed:
+        config_manager.save(config)
+        log_event("jobs_orphaned", "system", f"creator={username}")
 
 
 def list_users() -> list[dict[str, Any]]:
@@ -159,6 +182,48 @@ def list_users() -> list[dict[str, Any]]:
 def get_user(username: str) -> dict[str, Any] | None:
     """Return a single user record, or None if not found."""
     return next((u for u in load_users()["users"] if u["username"] == username), None)
+
+
+# ---------------------------------------------------------------------------
+# Per-user Grafana credentials
+# ---------------------------------------------------------------------------
+
+def get_grafana_credentials(username: str) -> dict[str, str]:
+    """Return {grafana_username, grafana_password} for the given app user.
+
+    Falls back to the global config.json credentials if the user's personal
+    ones are blank or not set. The fallback is transparent to callers.
+    """
+    from app import config_manager
+    user = get_user(username)
+    if user:
+        personal_u = user.get("grafana_username", "").strip()
+        personal_p = user.get("grafana_password", "").strip()
+        if personal_u:
+            return {"grafana_username": personal_u, "grafana_password": personal_p}
+
+    # Fall back to global config.json
+    global_settings = config_manager.get_grafana_settings()
+    return {
+        "grafana_username": global_settings.get("username", ""),
+        "grafana_password": global_settings.get("password", ""),
+    }
+
+
+def save_grafana_credentials(username: str, grafana_username: str, grafana_password: str) -> bool:
+    """Save personal Grafana credentials for the given app user.
+
+    Returns False if the user is not found.
+    """
+    users = load_users()
+    user = next((u for u in users["users"] if u["username"] == username), None)
+    if not user:
+        return False
+    user["grafana_username"] = grafana_username.strip()
+    user["grafana_password"] = grafana_password.strip()
+    save_users(users)
+    log_event("grafana_credentials_updated", username, "personal")
+    return True
 
 
 # ---------------------------------------------------------------------------

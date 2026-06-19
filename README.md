@@ -200,7 +200,7 @@ Edit `config.json`:
 - `org_id` — which Grafana organisation to operate in. Switch organisations from the Browse Grafana page instead of editing this by hand; it updates here automatically.
 - `smtp.tls_mode` — one of `"starttls"`, `"ssl"`, `"none"` — see [Email configuration](#email-configuration)
 
-You can also configure everything through the **Settings** page in the UI instead of editing the file directly. Note: `config.example.json` as committed currently lists a stale `api_key` field and is missing `org_id`/`tls_mode` — it does not match the real schema above; treat the schema in this README, not that file, as the source of truth until it's updated.
+You can also configure everything through the **Settings** page in the UI instead of editing the file directly.
 
 ---
 
@@ -298,7 +298,7 @@ APScheduler runs inside the Streamlit process. This means:
 
 ## Security cautions
 
-- **Never commit `config.json`, `contacts.json`, `app_users.json`, or `audit_log.json`** — they contain Grafana/SMTP credentials, recipient email addresses, password hashes, and login activity respectively. All four are listed in `.gitignore` (the `.gitignore` lists each filename explicitly — there is **no** blanket `*.json` rule, so any new sensitive JSON file must be added to it explicitly or it will be tracked by git).
+- **Never commit `config.json`, `contacts.json`, `app_users.json`, or `audit_log.json`** — they contain Grafana/SMTP credentials, recipient email addresses, password hashes, and login activity respectively. All four are listed in `.gitignore` (the `.gitignore` lists each filename explicitly — there is **no** blanket `*.json` rule, so any new sensitive JSON file must be added to it explicitly or it will be tracked by git). The `assets/` folder (company logo and other branding images) is also gitignored — copy your `company_logo.png` there after cloning.
 - Use a Grafana account with the minimum required permissions for the dashboards being reported on (Viewer is enough for reading dashboards and running queries).
 - Passwords are hashed with bcrypt (never stored or logged in plaintext); the password policy is 8–72 characters, enforced everywhere a password is set (setup wizard, self-service change, admin reset, new user creation).
 - The login system has no brute-force lockout — see [First-time setup & authentication](#first-time-setup--authentication).
@@ -316,10 +316,13 @@ grafana_reporter/
 ├── contacts.json              # Your local contacts (gitignored)
 ├── app_users.json             # User accounts + bcrypt password hashes (gitignored)
 ├── audit_log.json             # Login/account-management event log (gitignored)
-├── config.example.json        # Template — safe to commit (currently stale, see Configuration)
+├── config.example.json        # Template — safe to commit
 ├── contacts.example.json      # Template — safe to commit
 ├── app_users.example.json     # Schema reference only — not read by the app
 ├── requirements.txt
+│
+├── assets/                    # Branding assets — company logo etc. (gitignored)
+│   └── company_logo.png       # Displayed in the sidebar via ui_helpers.show_logo()
 │
 ├── output/                    # Generated PDFs and CSVs (gitignored)
 │
@@ -336,10 +339,11 @@ grafana_reporter/
     ├── data_fetcher.py        # Panel query execution (/api/ds/query → pandas)
     ├── screenshot_taker.py    # Chrome → Edge → mss screenshot fallback chain, whitespace trim
     ├── pdf_builder.py         # ReportLab PDF assembly, smart page packing
-    ├── mailer.py               # Platform-aware email sender (Outlook / SMTP)
-    ├── scheduler.py            # APScheduler job management
+    ├── mailer.py              # Platform-aware email sender (Outlook / SMTP)
+    ├── scheduler.py           # APScheduler job management
     ├── config_manager.py      # config.json read/write
-    └── contact_manager.py     # contacts.json read/write
+    ├── contact_manager.py     # contacts.json read/write
+    └── ui_helpers.py          # Shared Streamlit helpers (sidebar logo, etc.)
 ```
 
 Every module that persists a file anchors its path to the project root via `Path(__file__).parent[.parent]` rather than a relative string — this is intentional and load-bearing: it means the app behaves identically regardless of the working directory the process was launched from (a shortcut, a Task Scheduler entry, a different shell). `pdf_builder.py`'s default output directory follows this same pattern (see its top-of-file comment) — there is no remaining exception.
@@ -354,4 +358,4 @@ Every module that persists a file anchors its path to the project root via `Path
 - **Single Outlook profile** — on Windows, `win32com` uses whichever Outlook profile is currently open. Multiple accounts are not handled.
 - **LAN only** — the app assumes Grafana is reachable on a private network. No proxy or VPN configuration is built in.
 - **No brute-force protection on login**, and **no file-locking** around concurrent writes to the JSON data files — both acceptable for the single-PC, low-concurrency use case this targets, but worth knowing before relying on this for anything higher-stakes.
-- **`config.example.json` is currently out of sync** with the real config schema (lists a non-existent `api_key` field, missing `org_id` and `tls_mode`) — use the schema documented in [Configuration](#configuration) above, not that file, until it's updated.
+- **`config.example.json`** — treat the schema documented in [Configuration](#configuration) above as the source of truth; that file may lag behind real config additions.
