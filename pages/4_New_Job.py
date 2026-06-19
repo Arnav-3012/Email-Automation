@@ -10,24 +10,22 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import streamlit as st
 
 from app import config_manager, contact_manager, grafana_client, scheduler
-from app.auth_manager import get_user, require_auth
+from app.auth_manager import get_grafana_credentials, get_user, require_auth
+from app.ui_helpers import show_logo
 
+show_logo()
 require_auth(page_title="New Job", page_icon="➕")
 
 current_user: str = st.session_state.current_user
 current_role: str = (get_user(current_user) or {}).get("role", "user")
 is_admin = current_role == "admin"
 
+_creds = get_grafana_credentials(current_user) if current_user else None
+
 
 # ---------------------------------------------------------------------------
 # Display-name pre-fill helpers
 # ---------------------------------------------------------------------------
-#
-# Both helpers follow the same priority order: a name already saved on this
-# job (covers re-opening a job whose names were previously edited, or
-# deliberately blanked) > the real Grafana title we have on hand > a generic
-# fallback. Used both to seed session_state once (edit-mode init below) and
-# inline in the form sections further down.
 
 def _initial_panel_name(dash_uid: str, panel_id: int, saved_names: dict) -> str:
     """Pre-fill value for one panel's display-name field."""
@@ -39,10 +37,8 @@ def _initial_panel_name(dash_uid: str, panel_id: int, saved_names: dict) -> str:
     if composite_key in cached_titles:
         return cached_titles[composite_key]
 
-    # Last resort — e.g. editing an older job in a fresh session where we
-    # never captured this panel's title via Browse Grafana this time round.
     try:
-        return grafana_client.get_panel_title(dash_uid, panel_id)
+        return grafana_client.get_panel_title(dash_uid, panel_id, credentials=_creds)
     except Exception:
         return f"Panel {panel_id}"
 
@@ -65,17 +61,12 @@ _existing_job: dict = {}
 if _edit_mode and _edit_job_id:
     _existing_job = config_manager.get_job(_edit_job_id) or {}
 
-    # Ownership gate. The Dashboard page already hides the Edit button for
-    # jobs a regular user doesn't own, but this page is reachable directly
-    # via session state, so the rule has to be enforced here too, not just
-    # there.
     _job_owner = _existing_job.get("created_by", "")
     if _existing_job and not is_admin and _job_owner != current_user:
         st.error("🚫 You can only edit your own jobs.")
         st.stop()
 
-    st.title("Edit Job")
-    # Initialise form state once per edit session (guard against repeated reruns)
+    st.title("✏️ Edit Job")
     if st.session_state.get("edit_initialized_for") != _edit_job_id:
         st.session_state["job_draft_dashboards"] = list(_existing_job.get("dashboards", []))
         st.session_state["email_subject"] = _existing_job.get("email_subject", "")
@@ -93,168 +84,171 @@ if _edit_mode and _edit_job_id:
                 )
         st.session_state["edit_initialized_for"] = _edit_job_id
 else:
-    st.title("New Job")
+    st.title("➕ New Job")
 
 # ---------------------------------------------------------------------------
 # Job details
 # ---------------------------------------------------------------------------
 
-st.subheader("Job Details")
+with st.container(border=True):
+    st.subheader("Job Details")
 
-# New jobs default to the dashboard title just selected in Browse Grafana
-# (saves typing for the common case); editing a job always shows its saved
-# name. Either way it's a plain editable field — type over it freely.
-_default_job_name = _existing_job.get("name", "") or st.session_state.get(
-    "selected_dashboard_title", ""
-)
-job_name = st.text_input("Job Name", value=_default_job_name)
-pdf_title = st.text_input("PDF Title", value=_existing_job.get("pdf_title", ""))
-st.caption("Use {date} for today's date — e.g. Finance Summary – {date}")
-
-# Schedule row
-st.subheader("Schedule")
-
-col_freq, col_time, col_days = st.columns(3)
-
-_saved_sched = _existing_job.get("schedule", {})
-_freq_options = ["daily", "weekly", "monthly"]
-_saved_freq = _saved_sched.get("frequency", "daily")
-
-with col_freq:
-    frequency = st.selectbox(
-        "Frequency",
-        options=_freq_options,
-        index=_freq_options.index(_saved_freq) if _saved_freq in _freq_options else 0,
+    _default_job_name = _existing_job.get("name", "") or st.session_state.get(
+        "selected_dashboard_title", ""
     )
+    job_name = st.text_input("Job Name", value=_default_job_name)
+    pdf_title = st.text_input("PDF Title", value=_existing_job.get("pdf_title", ""))
+    st.caption("Use {date} for today's date — e.g. Finance Summary – {date}")
 
-_saved_time_str = _saved_sched.get("time", "08:30")
-try:
-    _th, _tm = map(int, _saved_time_str.split(":"))
-    _saved_time = datetime.time(_th, _tm)
-except Exception:
-    _saved_time = datetime.time(8, 30)
+# ---------------------------------------------------------------------------
+# Schedule
+# ---------------------------------------------------------------------------
 
-with col_time:
-    schedule_time = st.time_input("Schedule Time", value=_saved_time)
+with st.container(border=True):
+    st.subheader("Schedule")
 
-with col_days:
-    day_options = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-    _saved_days = _saved_sched.get("days", ["mon", "tue", "wed", "thu", "fri"])
-    if frequency in ("daily", "weekly"):
-        selected_days = st.multiselect(
-            "Days",
-            options=day_options,
-            default=_saved_days if _saved_days else ["mon", "tue", "wed", "thu", "fri"],
+    col_freq, col_time, col_days = st.columns(3)
+
+    _saved_sched = _existing_job.get("schedule", {})
+    _freq_options = ["daily", "weekly", "monthly"]
+    _saved_freq = _saved_sched.get("frequency", "daily")
+
+    with col_freq:
+        frequency = st.selectbox(
+            "Frequency",
+            options=_freq_options,
+            index=_freq_options.index(_saved_freq) if _saved_freq in _freq_options else 0,
         )
-    else:
-        st.text_input("Days", value="1st of each month", disabled=True)
-        selected_days = []
 
-st.divider()
+    _saved_time_str = _saved_sched.get("time", "08:30")
+    try:
+        _th, _tm = map(int, _saved_time_str.split(":"))
+        _saved_time = datetime.time(_th, _tm)
+    except Exception:
+        _saved_time = datetime.time(8, 30)
+
+    with col_time:
+        schedule_time = st.time_input("Schedule Time", value=_saved_time)
+
+    with col_days:
+        day_options = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        _saved_days = _saved_sched.get("days", ["mon", "tue", "wed", "thu", "fri"])
+        if frequency in ("daily", "weekly"):
+            selected_days = st.multiselect(
+                "Days",
+                options=day_options,
+                default=_saved_days if _saved_days else ["mon", "tue", "wed", "thu", "fri"],
+            )
+        else:
+            st.text_input("Days", value="1st of each month", disabled=True)
+            selected_days = []
 
 # ---------------------------------------------------------------------------
 # Dashboards & Panels
 # ---------------------------------------------------------------------------
 
-st.subheader("Dashboards & Panels")
+with st.container(border=True):
+    st.subheader("Dashboards & Panels")
 
-draft_dashboards: list = st.session_state.get("job_draft_dashboards", [])
-_saved_dashboard_names = _existing_job.get("dashboard_names", {})
+    draft_dashboards: list = st.session_state.get("job_draft_dashboards", [])
+    _saved_dashboard_names = _existing_job.get("dashboard_names", {})
 
-if not draft_dashboards:
-    st.info("No dashboards added yet. Use Browse Grafana in the sidebar to pick panels.")
-else:
-    for entry in draft_dashboards:
-        n = len(entry.get("panels", []))
-        dash_uid = entry.get("uid", "")
-        st.info(
-            f"**{entry['title']}**  \n"
-            f"{entry.get('folder_path', '')}  \n"
-            f"{n} panel{'s' if n != 1 else ''} selected"
-        )
+    if not draft_dashboards:
+        st.info("No dashboards added yet. Use **Browse Grafana** in the sidebar to pick panels.")
+    else:
+        for entry in draft_dashboards:
+            n = len(entry.get("panels", []))
+            dash_uid = entry.get("uid", "")
+            with st.container(border=True):
+                st.markdown(f"**📊 {entry['title']}**")
+                st.caption(f"📁 {entry.get('folder_path', '')} · {n} panel{'s' if n != 1 else ''} selected")
 
-        dash_name_key = f"dash_display_name_{dash_uid}"
-        st.session_state.setdefault(
-            dash_name_key,
-            _initial_dashboard_name(dash_uid, entry.get("title", dash_uid), _saved_dashboard_names),
-        )
-        st.text_input(
-            "Header name in PDF (pre-filled from Grafana — edit or clear for no header line)",
-            key=dash_name_key,
-        )
+                dash_name_key = f"dash_display_name_{dash_uid}"
+                st.session_state.setdefault(
+                    dash_name_key,
+                    _initial_dashboard_name(dash_uid, entry.get("title", dash_uid), _saved_dashboard_names),
+                )
+                st.text_input(
+                    "Header name in PDF (pre-filled from Grafana — edit or clear for no header line)",
+                    key=dash_name_key,
+                )
 
-    if st.button("Clear all"):
-        st.session_state["job_draft_dashboards"] = []
-        st.rerun()
-
-st.divider()
+        if st.button("🗑️ Clear all dashboards"):
+            st.session_state["job_draft_dashboards"] = []
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Recipients
 # ---------------------------------------------------------------------------
 
-st.subheader("Recipients")
+with st.container(border=True):
+    st.subheader("Recipients")
 
-all_contacts = contact_manager.get_all()
+    all_contacts = contact_manager.get_all()
 
-if not all_contacts:
-    st.info("No contacts found. Add recipients in the Contacts page first.")
-    selected_contacts = []
-else:
-    _saved_recipient_ids = set(_existing_job.get("recipient_ids", []))
-    _default_contacts = [c for c in all_contacts if c["id"] in _saved_recipient_ids]
-    selected_contacts = st.multiselect(
-        "Recipients",
-        options=all_contacts,
-        default=_default_contacts,
-        format_func=lambda c: f"{c['name']} ({c['email']})",
-    )
-
-st.divider()
+    if not all_contacts:
+        st.info("No contacts found. Add recipients in the **Contacts** page first.")
+        selected_contacts = []
+    else:
+        _saved_recipient_ids = set(_existing_job.get("recipient_ids", []))
+        _default_contacts = [c for c in all_contacts if c["id"] in _saved_recipient_ids]
+        selected_contacts = st.multiselect(
+            "Recipients",
+            options=all_contacts,
+            default=_default_contacts,
+            format_func=lambda c: f"{c['name']} ({c['email']})",
+        )
 
 # ---------------------------------------------------------------------------
 # Email Options
 # ---------------------------------------------------------------------------
 
-st.subheader("Email Options")
+with st.container(border=True):
+    st.subheader("Email Options")
 
-st.session_state.setdefault("email_subject", "")
-st.session_state.setdefault("email_message", "")
+    st.session_state.setdefault("email_subject", "")
+    st.session_state.setdefault("email_message", "")
 
-st.text_input(
-    "Custom email subject (optional)",
-    placeholder="Leave blank to use: <Job Name> – DD Mon YYYY",
-    key="email_subject",
-)
+    st.text_input(
+        "Custom email subject (optional)",
+        placeholder="Leave blank to use: <Job Name> – DD Mon YYYY",
+        key="email_subject",
+    )
 
-st.text_area(
-    "Custom message (optional)",
-    placeholder="Add a note to appear in the email body...",
-    key="email_message",
-    height=100,
-)
+    st.text_area(
+        "Custom message (optional)",
+        placeholder="Add a note to appear in the email body...",
+        key="email_message",
+        height=100,
+    )
 
-st.caption(
-    "Panel display names — pre-filled from Grafana, as they'll appear in the email and PDF. "
-    "Edit any of them, or clear one for no header label on that panel."
-)
+# ---------------------------------------------------------------------------
+# Panel Display Names
+# ---------------------------------------------------------------------------
 
 _saved_panel_names = _existing_job.get("panel_names", {})
 
-for dash_entry in draft_dashboards:
-    panel_ids = dash_entry.get("panels", [])
-    dash_uid = dash_entry.get("uid", "")
-    if panel_ids:
-        st.write(f"*{dash_entry['title']}*")
-        for panel_id in panel_ids:
-            unique_key = f"panel_name_{dash_uid}_{panel_id}"
-            st.session_state.setdefault(
-                unique_key, _initial_panel_name(dash_uid, panel_id, _saved_panel_names)
-            )
-            st.text_input(
-                f"Panel {panel_id} display name",
-                key=unique_key,
-            )
+if draft_dashboards:
+    with st.container(border=True):
+        st.subheader("Panel Display Names")
+        st.caption(
+            "Pre-filled from Grafana — as they'll appear in the email and PDF. "
+            "Edit any of them, or clear one for no header label on that panel."
+        )
+        for dash_entry in draft_dashboards:
+            panel_ids = dash_entry.get("panels", [])
+            dash_uid = dash_entry.get("uid", "")
+            if panel_ids:
+                st.markdown(f"*📊 {dash_entry['title']}*")
+                for panel_id in panel_ids:
+                    unique_key = f"panel_name_{dash_uid}_{panel_id}"
+                    st.session_state.setdefault(
+                        unique_key, _initial_panel_name(dash_uid, panel_id, _saved_panel_names)
+                    )
+                    st.text_input(
+                        f"Panel {panel_id} display name",
+                        key=unique_key,
+                    )
 
 st.divider()
 
@@ -262,9 +256,9 @@ st.divider()
 # Save & Schedule / Update & Reschedule
 # ---------------------------------------------------------------------------
 
-save_label = "Update & Reschedule" if _edit_mode else "Save & Schedule"
+save_label = "💾 Update & Reschedule" if _edit_mode else "💾 Save & Schedule"
 
-if st.button(save_label, type="primary"):
+if st.button(save_label, type="primary", use_container_width=True):
     errors = []
     if not job_name.strip():
         errors.append("Job name is required.")
@@ -277,12 +271,6 @@ if st.button(save_label, type="primary"):
         st.error(err)
 
     if not errors:
-        # Every dashboard/panel on this form had a visible, pre-filled
-        # field the user could see and edit — so we always save its
-        # current value, blank or not. A blank value is a deliberate "no
-        # header label", not "no opinion, fall back to Grafana's title";
-        # only an entirely missing key (legacy jobs saved before this
-        # feature existed) means the latter. See runner.py.
         panel_names: dict = {}
         dashboard_names: dict = {}
         for dash_entry in draft_dashboards:
@@ -319,9 +307,6 @@ if st.button(save_label, type="primary"):
         }
 
         if _edit_mode and _edit_job_id:
-            # created_by is intentionally NOT in shared_fields, so the
-            # original creator is preserved even when an admin edits
-            # someone else's job — editing never silently reassigns it.
             job = {**_existing_job, **shared_fields}
         else:
             job = {
@@ -337,11 +322,9 @@ if st.button(save_label, type="primary"):
         if job.get("status") == "active":
             scheduler.add_or_update_job(job)
 
-        # Clear edit mode session state
         for _key in ("edit_mode", "edit_job_id", "edit_initialized_for"):
             st.session_state.pop(_key, None)
 
-        # Clear draft and email option state
         st.session_state["job_draft_dashboards"] = []
         for key in list(st.session_state.keys()):
             if (
@@ -352,5 +335,5 @@ if st.button(save_label, type="primary"):
                 del st.session_state[key]
 
         verb = "updated" if _edit_mode else "saved and scheduled"
-        st.success(f"Job '{job['name']}' {verb}.")
+        st.success(f"✅ Job '{job['name']}' {verb}.")
         st.rerun()

@@ -21,6 +21,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "force_smtp": False,
         "tls_mode": "starttls"
     },
+    "debug_mode": False,
     "jobs": []
 }
 
@@ -106,6 +107,18 @@ def update_smtp_settings(
     save(config)
 
 
+def get_debug_mode() -> bool:
+    """Return True if debug logging is enabled in config."""
+    return bool(load().get("debug_mode", False))
+
+
+def set_debug_mode(enabled: bool) -> None:
+    """Persist debug_mode flag to config.json."""
+    config = load()
+    config["debug_mode"] = enabled
+    save(config)
+
+
 def get_jobs() -> list[dict[str, Any]]:
     """Return all job definitions from config."""
     return load().get("jobs", [])
@@ -182,14 +195,21 @@ def set_job_owner(job_id: str, username: str) -> bool:
     """Admin action: assign/reassign which user owns a job.
 
     Used to claim legacy jobs that predate this feature, or to reassign a
-    job left behind by a deleted user. Returns False if job_id is not found.
+    job left behind by a deleted user. Clears creator_deleted flag and
+    resumes the job if it was paused due to orphaning.
+    Returns False if job_id is not found.
     """
     config = load()
     jobs = config.get("jobs", [])
     job = next((j for j in jobs if j["id"] == job_id), None)
     if job is None:
         return False
+    was_orphaned = job.get("creator_deleted", False)
     job["created_by"] = username
+    job.pop("creator_deleted", None)
+    # Re-activate jobs that were paused solely because their creator was deleted.
+    if was_orphaned and job.get("status") == "paused":
+        job["status"] = "active"
     save(config)
     return True
 

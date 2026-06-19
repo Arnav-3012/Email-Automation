@@ -11,18 +11,21 @@ import streamlit as st
 
 from app import config_manager, contact_manager, scheduler
 from app.auth_manager import get_user, list_users, require_auth
+from app.ui_helpers import show_logo
 import runner
 
+show_logo()
 require_auth(page_title="Dashboard", page_icon="📋")
-st.title("Dashboard")
+st.title("📋 Dashboard")
 
-# Current user + role drive both which jobs are shown and which action
-# buttons are usable below — regular users only ever see/manage their own.
 current_user: str = st.session_state.current_user
 current_role: str = (get_user(current_user) or {}).get("role", "user")
 is_admin = current_role == "admin"
 
 jobs = config_manager.get_jobs_for_user(current_user, current_role)
+
+if not is_admin:
+    jobs = [j for j in jobs if not j.get("creator_deleted", False)]
 
 if "job_draft_dashboards" not in st.session_state:
     st.session_state["job_draft_dashboards"] = []
@@ -53,23 +56,40 @@ st.divider()
 # Jobs list
 # ---------------------------------------------------------------------------
 
-all_usernames = {u["username"] for u in list_users()}
+all_users = list_users()
+all_usernames = {u["username"] for u in all_users}
 
 if not jobs:
-    st.info("No jobs yet. Use New Job in the sidebar to create one.")
+    st.info("No jobs yet. Use **New Job** in the sidebar to create one.")
 else:
     for job in jobs:
         job_id = job["id"]
         can_manage = config_manager.can_manage_job(job, current_user, current_role)
         owner = job.get("created_by", "")
+        is_orphaned = job.get("creator_deleted", False)
+        job_status = job.get("status", "paused")
 
-        with st.container():
+        # Choose border colour class via container
+        with st.container(border=True):
             left, right = st.columns([2, 1.5])
 
             # ---- Left column ------------------------------------------------
             with left:
-                status_badge = "🟢" if job.get("status") == "active" else "⏸"
-                st.markdown(f"**{status_badge} {job['name']}**")
+                if is_orphaned:
+                    st.markdown(
+                        f"### ⚠️ {job['name']}"
+                    )
+                    st.markdown(":orange[**Deleted user's job — paused until reassigned**]")
+                else:
+                    if job_status == "active":
+                        status_badge = "🟢 Active"
+                        status_color = "green"
+                    else:
+                        status_badge = "⏸ Paused"
+                        status_color = "orange"
+
+                    st.markdown(f"### {job['name']}")
+                    st.markdown(f":{status_color}[**{status_badge}**]")
 
                 dash_count = len(job.get("dashboards", []))
                 recip_count = len(job.get("recipient_ids", []))
@@ -86,15 +106,15 @@ else:
                     sched_summary = f"{freq} at {time_str}"
 
                 st.caption(
-                    f"{dash_count} dashboard{'s' if dash_count != 1 else ''} · "
-                    f"{recip_count} recipient{'s' if recip_count != 1 else ''} · "
-                    f"{sched_summary}"
+                    f"📊 {dash_count} dashboard{'s' if dash_count != 1 else ''} · "
+                    f"👥 {recip_count} recipient{'s' if recip_count != 1 else ''} · "
+                    f"🕐 {sched_summary}"
                 )
 
-                # Admins manage jobs from every user, so label whose job this
-                # is; regular users only ever see their own, so it'd be noise.
                 if is_admin:
-                    if owner and owner in all_usernames:
+                    if is_orphaned:
+                        st.caption(f"👤 Created by: {owner} *(account deleted — reassign to unlock)*")
+                    elif owner and owner in all_usernames:
                         st.caption(f"👤 Created by: {owner}")
                     elif owner:
                         st.caption(f"👤 Created by: {owner} (account deleted)")
@@ -113,34 +133,34 @@ else:
                         run_label = str(last_run)
 
                     if last_status == "success":
-                        st.markdown(f"Last run: {run_label} — :green[success]")
+                        st.markdown(f"Last run: {run_label} — :green[✅ success]")
                     else:
                         st.markdown(
                             f"Last run: {run_label} — "
-                            f":red[{last_status or 'unknown'}]"
+                            f":red[❌ {last_status or 'unknown'}]"
                         )
 
             # ---- Right column -----------------------------------------------
             with right:
-                # can_manage is re-checked at every single action below, not
-                # just once for the row. In normal use this is always True
-                # here: get_jobs_for_user() only ever hands a regular user
-                # their own jobs, so every button a regular user sees is
-                # fully live — same as an admin's, just scoped to fewer
-                # cards. The per-button check exists as defense in depth
-                # (so a mutating action can never fire without its own
-                # permission check, regardless of how the row got rendered)
-                # and degrades gracefully to a disabled, explained button
-                # rather than a missing one if it's ever False.
                 deny_reason = "" if can_manage else "You can only manage jobs you created."
+                orphan_reason = "Reassign this job to a new owner before running or resuming." if is_orphaned else ""
 
-                b1, b2, b3, b4 = st.columns([1.2, 1.2, 1, 1])
+                # Next run shown at the top of the right column
+                next_run = scheduler.get_next_run(job_id)
+                st.caption(f"⏭ Next run: {next_run}")
+
+                st.markdown("")  # small spacer
+
+                b1, b2 = st.columns(2)
+                b3, b4 = st.columns(2)
 
                 with b1:
-                    if st.button("▶ Run", key=f"run_{job_id}",
+                    run_blocked = not can_manage or is_orphaned
+                    run_tip = orphan_reason or deny_reason
+                    if st.button("▶️ Run Now", key=f"run_{job_id}",
                                  use_container_width=True, type="primary",
-                                 disabled=not can_manage, help=deny_reason):
-                        if can_manage:
+                                 disabled=run_blocked, help=run_tip):
+                        if can_manage and not is_orphaned:
                             threading.Thread(
                                 target=runner.run_job,
                                 args=(job_id,),
@@ -149,8 +169,8 @@ else:
                             st.toast("Job started.")
 
                 with b2:
-                    if job.get("status") == "active":
-                        if st.button("⏸ Pause", key=f"pause_{job_id}",
+                    if job_status == "active":
+                        if st.button("⏸️ Pause", key=f"pause_{job_id}",
                                      use_container_width=True,
                                      disabled=not can_manage, help=deny_reason):
                             if can_manage:
@@ -158,17 +178,19 @@ else:
                                 scheduler.remove_job(job_id)
                                 st.rerun()
                     else:
-                        if st.button("▶ Resume", key=f"resume_{job_id}",
+                        resume_blocked = not can_manage or is_orphaned
+                        resume_tip = orphan_reason or deny_reason
+                        if st.button("▶️ Resume", key=f"resume_{job_id}",
                                      use_container_width=True, type="primary",
-                                     disabled=not can_manage, help=deny_reason):
-                            if can_manage:
+                                     disabled=resume_blocked, help=resume_tip):
+                            if can_manage and not is_orphaned:
                                 updated = {**job, "status": "active"}
                                 config_manager.upsert_job(updated)
                                 scheduler.add_or_update_job(updated)
                                 st.rerun()
 
                 with b3:
-                    if st.button("✏ Edit", key=f"edit_{job_id}",
+                    if st.button("✏️ Edit", key=f"edit_{job_id}",
                                  use_container_width=True,
                                  disabled=not can_manage, help=deny_reason):
                         if can_manage:
@@ -177,7 +199,7 @@ else:
                             st.switch_page("pages/4_New_Job.py")
 
                 with b4:
-                    if st.button("🗑 Del", key=f"del_{job_id}",
+                    if st.button("🗑️ Delete", key=f"del_{job_id}",
                                  use_container_width=True,
                                  disabled=not can_manage, help=deny_reason):
                         if can_manage:
@@ -185,20 +207,32 @@ else:
                             scheduler.remove_job(job_id)
                             st.rerun()
 
-                next_run = scheduler.get_next_run(job_id)
-                st.caption(f"Next run: {next_run}")
-
-                # Admin-only: claim/reassign jobs with no owner (pre-feature
-                # legacy jobs) or whose owner account has since been deleted.
-                if is_admin and (not owner or owner not in all_usernames):
-                    with st.expander("Reassign owner"):
+                # Admin-only: reassign orphaned jobs OR legacy jobs with no owner.
+                show_reassign = is_admin and (is_orphaned or not owner or owner not in all_usernames)
+                if show_reassign:
+                    active_usernames = sorted(
+                        u["username"] for u in all_users
+                        if not u.get("creator_deleted", False)
+                    )
+                    with st.expander("🔄 Reassign owner"):
+                        if is_orphaned:
+                            st.caption(
+                                "Reassigning will re-activate this job and clear the deleted-user lock."
+                            )
                         new_owner = st.selectbox(
                             "Assign this job to",
-                            options=sorted(all_usernames),
+                            options=active_usernames,
                             key=f"reassign_select_{job_id}",
                         )
-                        if st.button("Assign", key=f"reassign_btn_{job_id}"):
+                        if st.button("Assign", key=f"reassign_btn_{job_id}", type="primary"):
                             config_manager.set_job_owner(job_id, new_owner)
+                            if is_orphaned:
+                                updated_job = config_manager.get_job(job_id)
+                                if updated_job and updated_job.get("status") == "active":
+                                    scheduler.add_or_update_job(updated_job)
+                                try:
+                                    from app.auth_manager import log_event as _log_reassign
+                                    _log_reassign("job_reassigned", current_user, f"{job_id} → {new_owner}")
+                                except Exception:
+                                    pass
                             st.rerun()
-
-        st.divider()
