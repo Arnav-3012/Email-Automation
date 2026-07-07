@@ -10,6 +10,8 @@ from app.auth_manager import get_grafana_credentials, require_auth
 from app.grafana_client import GrafanaConnectionError
 from app.ui_helpers import show_logo
 
+_dbg = grafana_client._dbg
+
 show_logo()
 require_auth(page_title="Browse Grafana", page_icon="📂")
 st.title("📂 Browse Grafana")
@@ -64,7 +66,10 @@ with left_col:
             )
             selected_org_id = org_options[selected_org_label]
 
+            _dbg(f"Browse Grafana: org selected = {selected_org_id} ({selected_org_label})")
+
             if selected_org_id != current_stored_org:
+                _dbg(f"Browse Grafana: org changed {current_stored_org} → {selected_org_id}, switching")
                 settings = config_manager.get_grafana_settings()
                 settings["org_id"] = selected_org_id
                 config_manager.update_grafana_settings(**settings)
@@ -90,6 +95,7 @@ with left_col:
             st.stop()
 
         if not folders:
+            _dbg("Browse Grafana: no folders returned — falling back to empty state")
             st.info("No folders found. Check Grafana settings.")
             st.stop()
 
@@ -106,12 +112,15 @@ with left_col:
         selected_folder_uid = folder_options[selected_folder_title]
 
         if selected_folder_uid is None:
+            _dbg("Browse Grafana: no folder selected yet — stopping at Step 1")
             st.stop()
 
+        _dbg(f"Browse Grafana: folder selected = {selected_folder_uid!r} ({selected_folder_title})")
         _breadcrumb_parts.append(f"📁 {selected_folder_title}")
 
     # ── Step 2: Subfolder ────────────────────────────────
     if selected_folder_uid == "general":
+        _dbg("Browse Grafana: general folder selected — no subfolders to fetch")
         st.caption("📁 General folder — no subfolders.")
         folder_path = "General (No Folder)"
         active_folder_uid = "general"
@@ -137,13 +146,16 @@ with left_col:
                 )
                 selected_subfolder_uid = subfolder_options[selected_subfolder_title]
                 if selected_subfolder_uid:
+                    _dbg(f"Browse Grafana: shared subfolder selected = {selected_subfolder_uid!r}")
                     folder_path = f"Shared with me / {selected_subfolder_title}"
                     active_folder_uid = selected_subfolder_uid
                     _breadcrumb_parts.append(f"📁 {selected_subfolder_title}")
                 else:
+                    _dbg("Browse Grafana: 'Shared with me' root selected (no subfolder)")
                     folder_path = "Shared with me"
                     active_folder_uid = "sharedwithme"
             else:
+                _dbg("Browse Grafana: no shared subfolders found — falling back to 'Shared with me' root")
                 st.caption("No shared subfolders found.")
                 folder_path = "Shared with me"
                 active_folder_uid = "sharedwithme"
@@ -171,13 +183,16 @@ with left_col:
                 )
                 selected_subfolder_uid = subfolder_options[selected_subfolder_title]
                 if selected_subfolder_uid:
+                    _dbg(f"Browse Grafana: subfolder selected = {selected_subfolder_uid!r}")
                     folder_path = f"{selected_folder_title} / {selected_subfolder_title}"
                     active_folder_uid = selected_subfolder_uid
                     _breadcrumb_parts.append(f"📁 {selected_subfolder_title}")
                 else:
+                    _dbg(f"Browse Grafana: folder root selected (no subfolder) = {selected_folder_uid!r}")
                     folder_path = selected_folder_title
                     active_folder_uid = selected_folder_uid
             else:
+                _dbg(f"Browse Grafana: no subfolders for {selected_folder_uid!r} — using folder directly")
                 st.caption("No subfolders — using folder directly.")
                 folder_path = selected_folder_title
                 active_folder_uid = selected_folder_uid
@@ -195,6 +210,7 @@ with left_col:
             dashboards = []
 
         if not dashboards:
+            _dbg(f"Browse Grafana: no dashboards found in folder {active_folder_uid!r} — falling back to empty state")
             st.info("No dashboards in this folder.")
             st.stop()
 
@@ -211,8 +227,10 @@ with left_col:
         selected_dash_uid = dash_options[selected_dash_title]
 
         if selected_dash_uid is None:
+            _dbg("Browse Grafana: no dashboard selected yet — stopping at Step 3")
             st.stop()
 
+        _dbg(f"Browse Grafana: dashboard selected = {selected_dash_uid!r} ({selected_dash_title})")
         _breadcrumb_parts.append(f"📊 {selected_dash_title}")
 
     # Breadcrumb display

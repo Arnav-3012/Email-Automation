@@ -1,6 +1,7 @@
 """Grafana panel screenshot taker — Chrome Selenium → Edge Selenium → mss fallback."""
 
 import logging
+import platform
 import subprocess
 import time
 from io import BytesIO
@@ -8,6 +9,8 @@ from io import BytesIO
 from PIL import Image, ImageChops, ImageDraw
 
 logger = logging.getLogger(__name__)
+
+IS_LINUX = platform.system() == "Linux"
 
 
 def _is_debug() -> bool:
@@ -111,34 +114,38 @@ def _trim_whitespace(png_bytes: bytes, aggressive: bool = True, min_padding: int
 # ---------------------------------------------------------------------------
 
 def _get_chrome_driver():
-    """Return a headless Chrome WebDriver."""
+    """Return a Chrome WebDriver — headless on Linux, on-screen on Windows."""
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
     from webdriver_manager.chrome import ChromeDriverManager
 
     opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1280,800")
+    if IS_LINUX:
+        _dbg("_get_chrome_driver: Linux detected, adding headless flags")
+        opts.add_argument("--headless")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-extensions")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
 
 
 def _get_edge_driver():
-    """Return a headless Edge WebDriver, with fallback for older selenium."""
+    """Return an Edge WebDriver — headless on Linux, on-screen on Windows. Falls back for older selenium."""
     from selenium import webdriver
     from selenium.webdriver.edge.options import Options
 
     opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1280,800")
+    if IS_LINUX:
+        _dbg("_get_edge_driver: Linux detected, adding headless flags")
+        opts.add_argument("--headless")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--inprivate")
     try:
         from selenium.webdriver.edge.service import Service
@@ -320,6 +327,8 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
     driver = None
     method: str | None = None
 
+    _dbg(f"capture_panels: OS detected={platform.system()} (IS_LINUX={IS_LINUX})")
+
     # Level 1 — Chrome Selenium
     try:
         print("[screenshot_taker] Trying Chrome Selenium...", flush=True)
@@ -370,19 +379,25 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
                 pass
         return results
 
-    # Level 3 — mss screen capture
-    print("[screenshot_taker] Selenium blocked, trying mss screen capture...", flush=True)
-    _dbg("capture_panels: falling back to mss screen capture (Selenium unavailable)")
-    for panel_id in panel_ids:
-        try:
-            _dbg(f"capture_panels: mss capturing panel_id={panel_id}")
-            chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id)
-            results[panel_id] = chunks
-            print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
-            _dbg(f"capture_panels: panel_id={panel_id} OK via mss")
-        except Exception as e:
-            print(f"[screenshot_taker] Panel {panel_id} mss failed: {e}", flush=True)
-            _dbg(f"capture_panels: panel_id={panel_id} mss failed: {e} — using placeholder")
+    # Level 3 — mss screen capture (requires a real display, unavailable on headless Linux)
+    if not IS_LINUX:
+        print("[screenshot_taker] Selenium blocked, trying mss screen capture...", flush=True)
+        _dbg("capture_panels: falling back to mss screen capture (Selenium unavailable)")
+        for panel_id in panel_ids:
+            try:
+                _dbg(f"capture_panels: mss capturing panel_id={panel_id}")
+                chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id)
+                results[panel_id] = chunks
+                print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
+                _dbg(f"capture_panels: panel_id={panel_id} OK via mss")
+            except Exception as e:
+                print(f"[screenshot_taker] Panel {panel_id} mss failed: {e}", flush=True)
+                _dbg(f"capture_panels: panel_id={panel_id} mss failed: {e} — using placeholder")
+                results[panel_id] = _unavailable_png()
+    else:
+        print("[screenshot_taker] Selenium blocked and running on Linux — mss not available on headless Linux, Chrome headless is required", flush=True)
+        _dbg("capture_panels: mss not available on headless Linux, Chrome headless is required")
+        for panel_id in panel_ids:
             results[panel_id] = _unavailable_png()
 
     return results
