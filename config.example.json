@@ -1,0 +1,21 @@
+{
+  "grafana": {
+    "url": "http://your-grafana-url:3000",
+    "username": "your-grafana-username",
+    "password": "your-grafana-password",
+    "verify_ssl": true,
+    "ca_cert_path": "",
+    "debug_mode": false
+  },
+  "smtp": {
+    "host": "",
+    "port": 587,
+    "tls_mode": "None",
+    "username": "",
+    "password": "",
+    "force_smtp": false,
+    "sender_email": "",
+    "sender_name": "Grafana Reporter"
+  },
+  "jobs": []
+}

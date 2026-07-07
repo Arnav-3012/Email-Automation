@@ -1,0 +1,29 @@
+# Credentials and local config
+config.json
+contacts.json
+app_users.json
+audit_log.json
+CLAUDE.md
+
+# Generated output
+output/
+
+# Project assets (company logo, branding images)
+assets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+app/pages/

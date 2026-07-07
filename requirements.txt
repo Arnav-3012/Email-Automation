@@ -1,0 +1,12 @@
+streamlit
+requests
+pandas
+reportlab
+apscheduler
+pywin32; sys_platform == "win32"
+selenium
+webdriver-manager
+Pillow
+pdf2image
+mss
+bcrypt
