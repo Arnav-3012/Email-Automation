@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+import uuid
 from typing import Any
 
 import streamlit as st
@@ -59,7 +60,14 @@ def add_or_update_job(job_config: dict[str, Any]) -> None:
     "monthly" — runs on the 1st of every month at the given time.
     """
     sched = get_scheduler()
-    job_id: str = job_config["id"]
+    job_id = job_config.get("id")
+    if not job_id:
+        # Defense-in-depth: callers should always pass a job with an id by
+        # now, but don't let a stray legacy job crash the scheduler either —
+        # assign and persist one, same self-heal pattern used elsewhere.
+        job_id = str(uuid.uuid4())
+        job_config["id"] = job_id
+        config_manager.upsert_job(job_config)
 
     # Remove stale job if present
     if sched.get_job(job_id) is not None:
