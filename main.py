@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from app import scheduler
+from app import config_manager, scheduler
 from app.auth_manager import (
     has_users,
     initialize_users,
@@ -86,6 +86,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# One-time migration: give any legacy job missing an "id" a fresh uuid4,
+# before the scheduler (or any page) does an id-keyed lookup on it.
+if not st.session_state.get("jobs_migrated", False):
+    config_manager.migrate_jobs_add_missing_ids()
+    st.session_state["jobs_migrated"] = True
 
 # Start scheduler exactly once across Streamlit reruns
 if not st.session_state.get("scheduler_loaded", False):

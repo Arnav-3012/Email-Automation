@@ -1,6 +1,7 @@
 """User accounts, login verification, and audit logging for the Streamlit UI."""
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,12 @@ import streamlit as st
 # regardless of the cwd Streamlit was launched from.
 USERS_FILE = Path(__file__).parent.parent / "app_users.json"
 AUDIT_FILE = Path(__file__).parent.parent / "audit_log.json"
+
+# Guards every load-modify-save sequence against app_users.json (create_user,
+# delete_user, reset_password, etc. all read-modify-write the same file).
+_USERS_LOCK = threading.Lock()
+# Guards audit_log.json's read-modify-write append in log_event().
+_AUDIT_LOCK = threading.Lock()
 
 _MIN_PASSWORD_LEN = 8
 _MAX_PASSWORD_LEN = 72  # bcrypt's hard limit — longer raises ValueError
@@ -56,10 +63,16 @@ def load_users() -> dict[str, Any]:
 
 
 def save_users(users: dict[str, Any]) -> None:
-    """Write the given users dict to app_users.json."""
+    """Write the given users dict to app_users.json.
+
+    Writes to a temp file and atomically renames it into place so a
+    concurrent load_users() never observes a half-written file.
+    """
     USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with USERS_FILE.open("w", encoding="utf-8") as f:
+    tmp_path = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(users, f, indent=2)
+    tmp_path.replace(USERS_FILE)
 
 
 def has_users() -> bool:
@@ -74,13 +87,14 @@ def has_users() -> bool:
 
 def verify_login(username: str, password: str) -> bool:
     """Check credentials and, on success, stamp last_login. Returns success bool."""
-    users = load_users()
-    user = next((u for u in users["users"] if u["username"] == username), None)
-    if user and verify_password(password, user["password_hash"]):
-        user["last_login"] = datetime.now().isoformat() + "Z"
-        save_users(users)
-        return True
-    return False
+    with _USERS_LOCK:
+        users = load_users()
+        user = next((u for u in users["users"] if u["username"] == username), None)
+        if user and verify_password(password, user["password_hash"]):
+            user["last_login"] = datetime.now().isoformat() + "Z"
+            save_users(users)
+            return True
+        return False
 
 
 def initialize_users(username: str, password: str) -> None:
@@ -96,35 +110,38 @@ def initialize_users(username: str, password: str) -> None:
             }
         ]
     }
-    save_users(users)
+    with _USERS_LOCK:
+        save_users(users)
     log_event("system_init", username, "initial_admin_setup")
 
 
 def create_user(username: str, password: str, role: str = "user") -> bool:
     """Add a new user. Returns False if the username is already taken."""
-    users = load_users()
-    if any(u["username"] == username for u in users["users"]):
-        return False
-    users["users"].append({
-        "username": username,
-        "password_hash": hash_password(password),
-        "role": role,
-        "created_at": datetime.now().isoformat() + "Z",
-        "last_login": None,
-    })
-    save_users(users)
-    return True
+    with _USERS_LOCK:
+        users = load_users()
+        if any(u["username"] == username for u in users["users"]):
+            return False
+        users["users"].append({
+            "username": username,
+            "password_hash": hash_password(password),
+            "role": role,
+            "created_at": datetime.now().isoformat() + "Z",
+            "last_login": None,
+        })
+        save_users(users)
+        return True
 
 
 def reset_password(username: str, new_password: str) -> bool:
     """Admin-initiated password reset — does not require the old password."""
-    users = load_users()
-    user = next((u for u in users["users"] if u["username"] == username), None)
-    if not user:
-        return False
-    user["password_hash"] = hash_password(new_password)
-    save_users(users)
-    return True
+    with _USERS_LOCK:
+        users = load_users()
+        user = next((u for u in users["users"] if u["username"] == username), None)
+        if not user:
+            return False
+        user["password_hash"] = hash_password(new_password)
+        save_users(users)
+        return True
 
 
 def change_password(username: str, old_password: str, new_password: str) -> bool:
@@ -140,18 +157,19 @@ def delete_user(username: str) -> bool:
     Also orphans any jobs created by the deleted user: marks them with
     creator_deleted=True and sets their status to 'paused'.
     """
-    users = load_users()
-    target = next((u for u in users["users"] if u["username"] == username), None)
-    if not target:
-        return False
-    if target.get("role") == "admin":
-        remaining_admins = sum(
-            1 for u in users["users"] if u.get("role") == "admin" and u["username"] != username
-        )
-        if remaining_admins == 0:
-            return False  # would lock everyone out
-    users["users"] = [u for u in users["users"] if u["username"] != username]
-    save_users(users)
+    with _USERS_LOCK:
+        users = load_users()
+        target = next((u for u in users["users"] if u["username"] == username), None)
+        if not target:
+            return False
+        if target.get("role") == "admin":
+            remaining_admins = sum(
+                1 for u in users["users"] if u.get("role") == "admin" and u["username"] != username
+            )
+            if remaining_admins == 0:
+                return False  # would lock everyone out
+        users["users"] = [u for u in users["users"] if u["username"] != username]
+        save_users(users)
 
     # Orphan jobs whose creator is the deleted user
     _orphan_jobs_for_deleted_user(username)
@@ -162,15 +180,17 @@ def delete_user(username: str) -> bool:
 def _orphan_jobs_for_deleted_user(username: str) -> None:
     """Mark all jobs owned by a deleted user as orphaned and pause them."""
     from app import config_manager
-    config = config_manager.load()
-    changed = False
-    for job in config.get("jobs", []):
-        if job.get("created_by") == username:
-            job["creator_deleted"] = True
-            job["status"] = "paused"
-            changed = True
+    with config_manager.LOCK:
+        config = config_manager.load()
+        changed = False
+        for job in config.get("jobs", []):
+            if job.get("created_by") == username:
+                job["creator_deleted"] = True
+                job["status"] = "paused"
+                changed = True
+        if changed:
+            config_manager.save(config)
     if changed:
-        config_manager.save(config)
         log_event("jobs_orphaned", "system", f"creator={username}")
 
 
@@ -215,13 +235,14 @@ def save_grafana_credentials(username: str, grafana_username: str, grafana_passw
 
     Returns False if the user is not found.
     """
-    users = load_users()
-    user = next((u for u in users["users"] if u["username"] == username), None)
-    if not user:
-        return False
-    user["grafana_username"] = grafana_username.strip()
-    user["grafana_password"] = grafana_password.strip()
-    save_users(users)
+    with _USERS_LOCK:
+        users = load_users()
+        user = next((u for u in users["users"] if u["username"] == username), None)
+        if not user:
+            return False
+        user["grafana_username"] = grafana_username.strip()
+        user["grafana_password"] = grafana_password.strip()
+        save_users(users)
     log_event("grafana_credentials_updated", username, "personal")
     return True
 
@@ -232,21 +253,24 @@ def save_grafana_credentials(username: str, grafana_username: str, grafana_passw
 
 def log_event(event_type: str, username: str, details: str = "") -> None:
     """Append an entry to audit_log.json."""
-    audit: list[dict[str, Any]] = []
-    if AUDIT_FILE.exists():
-        with AUDIT_FILE.open("r", encoding="utf-8") as f:
-            audit = json.load(f).get("events", [])
+    with _AUDIT_LOCK:
+        audit: list[dict[str, Any]] = []
+        if AUDIT_FILE.exists():
+            with AUDIT_FILE.open("r", encoding="utf-8") as f:
+                audit = json.load(f).get("events", [])
 
-    audit.append({
-        "timestamp": datetime.now().isoformat() + "Z",
-        "event_type": event_type,
-        "username": username,
-        "details": details,
-    })
+        audit.append({
+            "timestamp": datetime.now().isoformat() + "Z",
+            "event_type": event_type,
+            "username": username,
+            "details": details,
+        })
 
-    AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with AUDIT_FILE.open("w", encoding="utf-8") as f:
-        json.dump({"events": audit}, f, indent=2)
+        AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = AUDIT_FILE.with_name(AUDIT_FILE.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump({"events": audit}, f, indent=2)
+        tmp_path.replace(AUDIT_FILE)
 
 
 def get_audit_log(limit: int = 100) -> list[dict[str, Any]]:

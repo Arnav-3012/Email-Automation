@@ -3,6 +3,7 @@
 import sys
 import threading
 import datetime
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -63,7 +64,14 @@ if not jobs:
     st.info("No jobs yet. Use **New Job** in the sidebar to create one.")
 else:
     for job in jobs:
-        job_id = job["id"]
+        job_id = job.get("id")
+        if not job_id:
+            # Legacy job predating the id field — assign and persist one now
+            # so the buttons below (keyed by job_id) work on this and every
+            # subsequent render.
+            job_id = str(uuid.uuid4())
+            job["id"] = job_id
+            config_manager.upsert_job(job)
         can_manage = config_manager.can_manage_job(job, current_user, current_role)
         owner = job.get("created_by", "")
         is_orphaned = job.get("creator_deleted", False)

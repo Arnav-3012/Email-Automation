@@ -310,7 +310,7 @@ if st.button(save_label, type="primary", use_container_width=True):
             job = {**_existing_job, **shared_fields}
         else:
             job = {
-                "id": f"job_{uuid.uuid4().hex[:6]}",
+                "id": str(uuid.uuid4()),
                 "status": "active",
                 "last_run": None,
                 "last_status": None,
