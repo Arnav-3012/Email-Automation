@@ -21,7 +21,8 @@ from app.auth_manager import (
     save_grafana_credentials,
     validate_password,
 )
-from app.grafana_client import GrafanaConnectionError, test_connection
+from app import mailer
+from app.grafana_client import GrafanaConnectionError, get_organisations, test_connection
 from app.ui_helpers import show_logo
 
 show_logo()
@@ -75,13 +76,21 @@ with st.container(border=True):
                 )
             else:
                 try:
-                    test_connection(credentials=creds)
+                    health = test_connection(credentials=creds)
+                    version = health.get("version", "unknown")
+                    try:
+                        org_count = len(get_organisations(credentials=creds))
+                    except Exception:
+                        org_count = None
                     effective = (
                         "personal credentials"
                         if my_grafana_username.strip()
                         else "global fallback credentials"
                     )
-                    st.success(f"✅ Connected — using {effective}.")
+                    org_part = f" · {org_count} org(s)" if org_count is not None else ""
+                    st.success(
+                        f"✅ Connected — using {effective} — Grafana {version}{org_part}"
+                    )
                 except GrafanaConnectionError as e:
                     st.error(str(e))
 
@@ -126,8 +135,14 @@ if is_admin:
                     password=grafana.get("password", ""),
                 )
                 try:
-                    test_connection()
-                    st.success("✅ Connected — Grafana reachable.")
+                    health = test_connection()
+                    version = health.get("version", "unknown")
+                    try:
+                        org_count = len(get_organisations())
+                    except Exception:
+                        org_count = None
+                    org_part = f" · {org_count} org(s)" if org_count is not None else ""
+                    st.success(f"✅ Connected — Grafana {version}{org_part}")
                 except GrafanaConnectionError as e:
                     st.error(str(e))
 
@@ -171,6 +186,23 @@ if is_admin:
                 tls_mode=smtp_tls_mode,
             )
             st.success("Saved.")
+
+        st.markdown("### 📧 Test Email")
+        test_email = st.text_input("Send test email to:", placeholder="your@email.com")
+        if st.button("Send Test Email"):
+            if not test_email.strip():
+                st.error("Enter a recipient email")
+            else:
+                try:
+                    mailer.send(
+                        to_contacts=[{"email": test_email.strip(), "name": "Test"}],
+                        subject="Grafana Reporter — Test Email",
+                        attachments=[],
+                        custom_message="This is a test email. SMTP settings are working.",
+                    )
+                    st.success(f"✅ Test email sent to {test_email.strip()}")
+                except Exception as e:
+                    st.error(f"❌ Email send failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Debug Logging (admin only)

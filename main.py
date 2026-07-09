@@ -11,12 +11,25 @@ from app.auth_manager import (
     validate_password,
     verify_login,
 )
+from app.session_manager import cleanup_expired_sessions, create_session, validate_session
 from app.ui_helpers import show_logo
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
+
+cleanup_expired_sessions()
+
+# Existing valid session token → auto-login (survives a browser refresh).
+# Missing/invalid/expired token → fall through to the normal login form.
+if not st.session_state.authenticated:
+    _session_token = st.query_params.get("session", "")
+    if _session_token:
+        _session_username = validate_session(_session_token)
+        if _session_username:
+            st.session_state.authenticated = True
+            st.session_state.current_user = _session_username
 
 # ---------------------------------------------------------------------------
 # Setup wizard — first run only (no users yet, whether app_users.json is
@@ -47,6 +60,7 @@ if not has_users():
                 initialize_users(username, password)
                 st.session_state.authenticated = True
                 st.session_state.current_user = username
+                st.query_params["session"] = create_session(username)
                 st.success("✅ Admin account created! Redirecting...")
                 st.rerun()
     st.stop()
@@ -69,6 +83,7 @@ if not st.session_state.authenticated:
             if verify_login(username, password):
                 st.session_state.authenticated = True
                 st.session_state.current_user = username
+                st.query_params["session"] = create_session(username)
                 log_event("login_success", username)
                 st.rerun()
             else:

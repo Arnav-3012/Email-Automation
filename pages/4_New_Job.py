@@ -68,6 +68,11 @@ if _edit_mode and _edit_job_id:
 
     st.title("✏️ Edit Job")
     if st.session_state.get("edit_initialized_for") != _edit_job_id:
+        # Drop any stale variable-selectbox state from a previously edited/created
+        # job — Streamlit errors if a selectbox's session-state value isn't among
+        # the options list it's given this render, so these must start fresh.
+        for _k in [k for k in st.session_state.keys() if k.startswith("var_")]:
+            del st.session_state[_k]
         st.session_state["job_draft_dashboards"] = list(_existing_job.get("dashboards", []))
         st.session_state["email_subject"] = _existing_job.get("email_subject", "")
         st.session_state["email_message"] = _existing_job.get("email_message", "")
@@ -101,14 +106,30 @@ with st.container(border=True):
     st.caption("Use {date} for today's date — e.g. Finance Summary – {date}")
 
     time_range_options = {
-        "Last 1 hour":   {"from": "now-1h",  "to": "now"},
-        "Last 6 hours":  {"from": "now-6h",  "to": "now"},
-        "Last 24 hours": {"from": "now-24h", "to": "now"},
-        "Last 7 days":   {"from": "now-7d",  "to": "now"},
-        "Last 30 days":  {"from": "now-30d", "to": "now"},
-        "Today":         {"from": "now/d",   "to": "now"},
-        "This week":     {"from": "now/w",   "to": "now"},
-        "This month":    {"from": "now/M",   "to": "now"},
+        "Last 5 minutes":  {"from": "now-5m",   "to": "now"},
+        "Last 15 minutes": {"from": "now-15m",  "to": "now"},
+        "Last 30 minutes": {"from": "now-30m",  "to": "now"},
+        "Last 1 hour":     {"from": "now-1h",   "to": "now"},
+        "Last 3 hours":    {"from": "now-3h",   "to": "now"},
+        "Last 6 hours":    {"from": "now-6h",   "to": "now"},
+        "Last 12 hours":   {"from": "now-12h",  "to": "now"},
+        "Last 24 hours":   {"from": "now-24h",  "to": "now"},
+        "Last 2 days":     {"from": "now-2d",   "to": "now"},
+        "Last 7 days":     {"from": "now-7d",   "to": "now"},
+        "Last 30 days":    {"from": "now-30d",  "to": "now"},
+        "Last 90 days":    {"from": "now-90d",  "to": "now"},
+        "Last 6 months":   {"from": "now-6M",   "to": "now"},
+        "Last 1 year":     {"from": "now-1y",   "to": "now"},
+        "Last 2 years":    {"from": "now-2y",   "to": "now"},
+        "Last 5 years":    {"from": "now-5y",   "to": "now"},
+        "Today":           {"from": "now/d",    "to": "now"},
+        "This week":       {"from": "now/w",    "to": "now"},
+        "This month":      {"from": "now/M",    "to": "now"},
+        "This year":       {"from": "now/y",    "to": "now"},
+        "Yesterday":       {"from": "now-1d/d", "to": "now-1d/d"},
+        "Previous week":   {"from": "now-1w/w", "to": "now-1w/w"},
+        "Previous month":  {"from": "now-1M/M", "to": "now-1M/M"},
+        "Previous year":   {"from": "now-1y/y", "to": "now-1y/y"},
     }
 
     _saved_range = _existing_job.get("time_range", {"from": "now-24h", "to": "now"})
@@ -123,7 +144,8 @@ with st.container(border=True):
         index=list(time_range_options.keys()).index(_saved_range_label),
         help=(
             "Grafana data time range for this report. "
-            "Match this to where your dashboard data lives."
+            "Match this to where your dashboard data lives. "
+            "Note: longer ranges (1 year+) take longer to load and screenshot."
         ),
     )
 
@@ -214,6 +236,85 @@ with st.container(border=True):
         if st.button("🗑️ Clear all dashboards"):
             st.session_state["job_draft_dashboards"] = []
             st.rerun()
+
+# ---------------------------------------------------------------------------
+# Dashboard Variables
+# ---------------------------------------------------------------------------
+
+_VAR_DEFAULT_LABEL = "Use Dashboard Default"
+_VAR_FAILED_LABEL = "⚠️ Data failed to load — use current dashboard state"
+
+if draft_dashboards:
+    with st.container(border=True):
+        st.subheader("Dashboard Variables")
+        st.caption(
+            "Customize filter values for each dashboard. Leave as "
+            f"'{_VAR_DEFAULT_LABEL}' to use whatever is currently set in Grafana."
+        )
+
+        variable_overrides: dict = {}
+        _saved_var_overrides = _existing_job.get("variable_overrides", {})
+
+        for dash in draft_dashboards:
+            dash_uid = dash.get("uid", "")
+            dash_title = dash.get("title", dash_uid)
+            saved_overrides = _saved_var_overrides.get(dash_uid, {})
+
+            st.markdown(f"**📊 {dash_title}**")
+
+            with st.spinner(f"Fetching variables for {dash_title}..."):
+                var_options = grafana_client.get_dashboard_variable_options(
+                    dash_uid, credentials=_creds
+                )
+
+            if not var_options:
+                st.caption("No template variables found for this dashboard.")
+                variable_overrides[dash_uid] = {}
+                continue
+
+            dash_overrides = {}
+
+            for var_name, var_info in var_options.items():
+                label = var_info.get("label", var_name)
+                options = var_info.get("options", [])
+                has_all = var_info.get("has_all", False)
+                current = var_info.get("current", "")
+                fetch_failed = var_info.get("fetch_failed", False)
+
+                select_options = [_VAR_DEFAULT_LABEL]
+                if fetch_failed:
+                    select_options.append(_VAR_FAILED_LABEL)
+                else:
+                    if has_all:
+                        select_options.append("All")
+                    select_options.extend(options)
+
+                saved_value = saved_overrides.get(var_name, _VAR_DEFAULT_LABEL)
+                try:
+                    saved_index = select_options.index(saved_value)
+                except ValueError:
+                    saved_index = 0
+
+                selected = st.selectbox(
+                    label,
+                    options=select_options,
+                    index=saved_index,
+                    key=f"var_{dash_uid}_{var_name}",
+                    help=(
+                        f"Current Grafana default: {current or 'not set'}. "
+                        f"Select '{_VAR_DEFAULT_LABEL}' to keep this value."
+                    ),
+                )
+
+                # "Use Dashboard Default" / failed-fetch sentinel → no override
+                # saved, so no var- param is added to the screenshot URL and
+                # Grafana's own current value is used.
+                if selected not in (_VAR_DEFAULT_LABEL, _VAR_FAILED_LABEL):
+                    dash_overrides[var_name] = selected
+
+            variable_overrides[dash_uid] = dash_overrides
+
+        st.session_state["variable_overrides"] = variable_overrides
 
 # ---------------------------------------------------------------------------
 # Recipients
@@ -343,6 +444,7 @@ if st.button(save_label, type="primary", use_container_width=True):
             "email_message": st.session_state.get("email_message", "").strip(),
             "panel_names": panel_names,
             "dashboard_names": dashboard_names,
+            "variable_overrides": st.session_state.get("variable_overrides", {}),
         }
 
         if _edit_mode and _edit_job_id:
@@ -365,11 +467,13 @@ if st.button(save_label, type="primary", use_container_width=True):
             st.session_state.pop(_key, None)
 
         st.session_state["job_draft_dashboards"] = []
+        st.session_state.pop("variable_overrides", None)
         for key in list(st.session_state.keys()):
             if (
                 key in ("email_subject", "email_message")
                 or key.startswith("panel_name_")
                 or key.startswith("dash_display_name_")
+                or key.startswith("var_")
             ):
                 del st.session_state[key]
 

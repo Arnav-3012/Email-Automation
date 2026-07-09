@@ -482,3 +482,167 @@ def get_dashboard_variables(dashboard_uid: str, credentials: dict = None) -> dic
     except Exception as e:
         _warn(f"Could not fetch template variables for {dashboard_uid}: {e}")
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Variable option lists — for the "Dashboard Variables" job-config UI
+# ---------------------------------------------------------------------------
+
+# Only SQL-family datasources support re-running the variable's raw query
+# through /api/ds/query (same mechanism app/data_fetcher.py uses for panels).
+# Other datasource types (Prometheus, InfluxDB, etc.) each need their own
+# query-building rules, so they're reported as fetch_failed instead of
+# guessed at.
+_SQL_DATASOURCE_TYPES = {"mysql", "postgres", "postgresql", "mssql"}
+
+
+def get_dashboard_variable_options(dashboard_uid: str, credentials: dict = None) -> dict:
+    """Fetch all selectable options for each template variable in a dashboard.
+
+    Always resolved fresh (dashboard JSON +, where possible, a live query) —
+    never cached — so options reflect current Grafana state.
+
+    Resolution per variable type:
+      - custom/constant: values are static text already in the variable
+        definition — parsed directly, no extra API call.
+      - query, backed by a SQL datasource (MySQL/Postgres/MSSQL): the
+        variable's raw SQL is re-executed via /api/ds/query for live values.
+      - query on any other datasource, or on any error: options can't be
+        reliably resolved. Reported with fetch_failed=True rather than a
+        possibly-stale or empty list, so callers can show a "data failed to
+        load" state and fall back to the dashboard's current value.
+
+    Returns {var_name: {label, options, has_all, current, type, fetch_failed}}.
+    Returns {} if the dashboard has no user-selectable variables, or on any
+    unrecoverable error. Never raises.
+    """
+    try:
+        dashboard_json = get_dashboard(dashboard_uid, credentials=credentials)
+        templating = dashboard_json.get("dashboard", {}).get("templating", {}).get("list", [])
+        if not templating:
+            return {}
+
+        result = {}
+        for var in templating:
+            var_name = var.get("name", "")
+            if not var_name:
+                continue
+            var_type = var.get("type", "")
+            if var_type in ("datasource", "interval", "textbox"):
+                continue
+
+            var_label = var.get("label", "") or var_name
+            include_all = bool(var.get("includeAll", False))
+            current = var.get("current", {})
+            current_value = current.get("value", "")
+            if isinstance(current_value, list):
+                current_value = current_value[0] if current_value else ""
+
+            options: list = []
+            fetch_failed = False
+
+            if var_type in ("custom", "constant"):
+                options = _parse_static_variable_options(var)
+            elif var_type == "query":
+                try:
+                    options = _fetch_sql_variable_options(var, credentials=credentials)
+                    if not options:
+                        fetch_failed = True
+                except Exception as e:
+                    _warn(
+                        f"get_dashboard_variable_options: query resolution failed "
+                        f"for {dashboard_uid}/{var_name}: {e}"
+                    )
+                    options = []
+                    fetch_failed = True
+            else:
+                # Unknown/unsupported variable type — nothing safe to offer.
+                fetch_failed = True
+
+            result[var_name] = {
+                "label": var_label,
+                "options": options,
+                "has_all": include_all,
+                "current": str(current_value),
+                "type": var_type,
+                "fetch_failed": fetch_failed,
+            }
+
+        return result
+    except Exception as e:
+        _warn(f"Could not fetch variable options for {dashboard_uid}: {e}")
+        return {}
+
+
+def _parse_static_variable_options(var: dict) -> list:
+    """Parse a custom/constant variable's comma-separated value list.
+
+    Each entry may be "text : value" (Grafana's custom-variable shorthand)
+    or a bare value.
+    """
+    raw = var.get("query", "")
+    if isinstance(raw, dict):
+        raw = raw.get("query", "")
+    raw = str(raw or "")
+
+    options = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        text = part.split(":", 1)[0].strip() if ":" in part else part
+        if text and text not in options:
+            options.append(text)
+    return options
+
+
+def _fetch_sql_variable_options(var: dict, credentials: dict = None) -> list:
+    """Re-run a query-type variable's raw SQL via /api/ds/query for live options.
+
+    Only supported for SQL-family datasources — returns [] (caller treats
+    this as fetch_failed) if the datasource isn't SQL-family, has no query
+    text, or the query yields no rows.
+    """
+    datasource = var.get("datasource") or {}
+    if not isinstance(datasource, dict):
+        return []
+    ds_type = (datasource.get("type") or "").lower()
+    ds_uid = datasource.get("uid") or ""
+    if ds_type not in _SQL_DATASOURCE_TYPES or not ds_uid:
+        return []
+
+    raw_query = var.get("query", "")
+    if isinstance(raw_query, dict):
+        sql_text = raw_query.get("rawSql") or raw_query.get("query") or raw_query.get("sql", "")
+    else:
+        sql_text = str(raw_query or "")
+    if not sql_text:
+        return []
+
+    payload = {
+        "queries": [{
+            "datasource": {"uid": ds_uid},
+            "rawSql": sql_text,
+            "format": "table",
+            "refId": "A",
+            "intervalMs": 60000,
+            "maxDataPoints": 1000,
+        }],
+        "from": "now-5y",
+        "to": "now",
+    }
+    response = execute_ds_query(payload, credentials=credentials)
+    frames = response.get("results", {}).get("A", {}).get("frames", [])
+    if not frames:
+        return []
+
+    values = frames[0].get("data", {}).get("values", [])
+    if not values:
+        return []
+
+    seen = []
+    for v in values[0]:
+        s = str(v)
+        if s and s not in seen:
+            seen.append(s)
+    return seen

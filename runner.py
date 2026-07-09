@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -24,12 +25,21 @@ TABLE_TYPES = {"table", "datagrid", "table-old"}
 # process was launched from (e.g. a Task Scheduler entry without a "Start in"
 # directory set to this folder).
 OUTPUT_DIR = Path(__file__).parent / "output"
+LOG_DIR = OUTPUT_DIR / "logs"
+
+
+def _safe_print(msg: str) -> None:
+    """Print safely regardless of the console's encoding (e.g. Windows cp1252)."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        print(msg.encode("ascii", errors="replace").decode("ascii"), flush=True)
 
 
 def _log(msg: str) -> None:
     """Print a timestamped log line to stdout."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    _safe_print(f"[{ts}] {msg}")
 
 
 def _resolve_title(overrides: dict[str, str], key: str, fallback: str) -> str:
@@ -55,10 +65,41 @@ def run_job(job_id: str) -> None:
     """
     job = config_manager.get_job(job_id)
     if not job:
-        _log(f"Job {job_id!r} not found — aborting.")
+        _log(f"Job {job_id!r} not found - aborting.")
         return
 
     _log(f"Starting job: {job['name']}")
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOG_DIR / f"{job_id}_{date.today()}.json"
+    job_log: dict[str, Any] = {
+        "job_id": job_id,
+        "job_name": job.get("name", ""),
+        "started_at": datetime.now().isoformat(),
+        "finished_at": None,
+        "status": "running",
+        "events": [],
+    }
+
+    def _log_event(event_type: str, message: str) -> None:
+        """Append a structured event and persist the log file. Never raises."""
+        job_log["events"].append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": event_type,
+            "message": message,
+        })
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(job_log, f, indent=2)
+        except OSError:
+            pass
+
+    try:
+        config_manager.update_job_log_file(job_id, str(log_file))
+    except Exception:
+        pass
+
+    _log_event("info", "Job started")
 
     config_manager.update_job_run_status(
         job_id,
@@ -78,6 +119,14 @@ def run_job(job_id: str) -> None:
     credentials = get_grafana_credentials(creator) if creator else None
     if not credentials or not credentials.get("grafana_username"):
         _log(f"Job FAILED: creator '{creator}' has no Grafana credentials configured (personal or fallback)")
+        _log_event("error", f"Job failed: creator '{creator}' has no Grafana credentials configured")
+        job_log["finished_at"] = datetime.now().isoformat()
+        job_log["status"] = "failed"
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(job_log, f, indent=2)
+        except OSError:
+            pass
         config_manager.update_job_run_status(
             job_id,
             last_run=datetime.now().isoformat(timespec="seconds"),
@@ -91,6 +140,8 @@ def run_job(job_id: str) -> None:
         "username": credentials["grafana_username"],
         "password": credentials["grafana_password"],
     }
+
+    _log_event("info", "Grafana login successful")
 
     recipients = contact_manager.resolve_ids(job.get("recipient_ids", []))
     panel_names = job.get("panel_names", {})
@@ -106,6 +157,7 @@ def run_job(job_id: str) -> None:
             uid: str = dashboard["uid"]
             panel_ids: list[int] = dashboard.get("panels", [])
             _log(f"Fetching dashboard: {dashboard.get('title', uid)}")
+            _log_event("info", f"Fetching dashboard: {dashboard.get('title', uid)}")
 
             dashboard_json = grafana_client.get_dashboard(uid, credentials=credentials)
             grafana_dashboard_title = (
@@ -119,16 +171,23 @@ def run_job(job_id: str) -> None:
             chart_panels = [p for p in selected if p.get("type") not in TABLE_TYPES]
             table_panels = [p for p in selected if p.get("type") in TABLE_TYPES]
 
-            # Template variable values for this dashboard — safe no-op ({}) if none exist
-            try:
-                variables = grafana_client.get_dashboard_variables(uid, credentials=credentials)
-                if variables:
-                    _log(f"Dashboard {uid} variables: {variables}")
-                else:
-                    _log(f"Dashboard {uid} has no template variables")
-            except Exception as e:
-                variables = {}
-                _log(f"Variable fetch failed for {uid} (continuing without): {e}")
+            # Template variable values for this dashboard — saved per-job overrides
+            # take precedence; otherwise fall back to live-detected defaults.
+            # Safe no-op ({}) if neither exist.
+            saved_overrides = job.get("variable_overrides", {}).get(uid, {})
+            if saved_overrides:
+                variables = {k: ("$__all" if v == "All" else v) for k, v in saved_overrides.items()}
+                _log(f"Dashboard {uid}: using saved variable overrides: {variables}")
+            else:
+                try:
+                    variables = grafana_client.get_dashboard_variables(uid, credentials=credentials)
+                    if variables:
+                        _log(f"Dashboard {uid} variables: {variables}")
+                    else:
+                        _log(f"Dashboard {uid} has no template variables")
+                except Exception as e:
+                    variables = {}
+                    _log(f"Variable fetch failed for {uid} (continuing without): {e}")
 
             # Full dashboard overview screenshot
             try:
@@ -136,8 +195,10 @@ def run_job(job_id: str) -> None:
                     uid, grafana_settings_with_creds, from_time=from_time, to_time=to_time, variables=variables
                 )
                 _log(f"Full dashboard captured: {dashboard.get('title', uid)}")
+                _log_event("info", "Full dashboard screenshot captured")
             except Exception as e:
                 _log(f"Full dashboard capture failed: {e}")
+                _log_event("warning", f"Full dashboard capture failed: {e}")
                 dashboard_screenshots[uid] = None
 
             # Screenshots for chart panels
@@ -147,6 +208,7 @@ def run_job(job_id: str) -> None:
                     uid, chart_ids, grafana_settings_with_creds,
                     from_time=from_time, to_time=to_time, variables=variables,
                 )
+                _log_event("info", f"Captured {len(screenshots)} panel screenshot(s)")
                 for panel in chart_panels:
                     panel_title = _resolve_title(
                         panel_names, f"{uid}_{panel['id']}",
@@ -185,6 +247,7 @@ def run_job(job_id: str) -> None:
             # Data fetch for table panels → CSV
             for panel in table_panels:
                 try:
+                    _log_event("info", f"Fetching table panel data: {panel['title']}")
                     df = data_fetcher.fetch_panel_data(panel, grafana_client, credentials=credentials)
                     if df is not None and not df.empty:
                         panel_title = _resolve_title(
@@ -203,8 +266,10 @@ def run_job(job_id: str) -> None:
                 except ValueError as e:
                     # Unsupported datasource — screenshot already captured above
                     _log(f"Table panel '{panel['title']}': datasource not supported for CSV, screenshot included in PDF")
+                    _log_event("warning", f"Table panel '{panel['title']}': datasource not supported for CSV")
                 except Exception as e:
                     _log(f"Table panel {panel['title']} failed: {e}")
+                    _log_event("warning", f"Table panel '{panel['title']}' data fetch failed: {e}")
 
         _log(f"Screenshots captured: {len(panels_data)} panel(s) for PDF, {len(table_panels_data)} table panel(s) for CSV")
 
@@ -213,6 +278,7 @@ def run_job(job_id: str) -> None:
             pdf_path = pdf_builder.build(job, panels_data, dashboard_screenshots)
             attachments.append(pdf_path)
             _log(f"PDF built: {pdf_path}")
+            _log_event("info", f"PDF built: {Path(pdf_path).name}")
 
         # Build individual CSV attachments with metadata headers
         if table_panels_data:
@@ -348,7 +414,7 @@ def run_job(job_id: str) -> None:
                         writer.writerow(row.tolist())
 
                 attachments.append(csv_path)
-                _log(f"CSV built: {item['panel']['title']} → {csv_path}")
+                _log(f"CSV built: {item['panel']['title']} -> {csv_path}")
 
         # Send email with all attachments
         custom_subject = job.get("email_subject", "").strip()
@@ -359,6 +425,7 @@ def run_job(job_id: str) -> None:
         custom_message = job.get("email_message", "")
         mailer.send(recipients, subject, attachments, custom_message)
         _log(f"Email sent to {len(recipients)} recipient(s)")
+        _log_event("info", f"Email sent to {len(recipients)} recipient(s)")
 
         config_manager.update_job_run_status(
             job_id,
@@ -366,6 +433,14 @@ def run_job(job_id: str) -> None:
             last_status="success",
         )
         _log("Job completed successfully")
+        _log_event("success", "Job completed successfully")
+        job_log["finished_at"] = datetime.now().isoformat()
+        job_log["status"] = "success"
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(job_log, f, indent=2)
+        except OSError:
+            pass
 
     except Exception as exc:
         config_manager.update_job_run_status(
@@ -374,6 +449,14 @@ def run_job(job_id: str) -> None:
             last_status="failed",
         )
         _log(f"Job FAILED: {exc}")
+        _log_event("error", f"Job failed: {exc}")
+        job_log["finished_at"] = datetime.now().isoformat()
+        job_log["status"] = "failed"
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(job_log, f, indent=2)
+        except OSError:
+            pass
         raise
 
 

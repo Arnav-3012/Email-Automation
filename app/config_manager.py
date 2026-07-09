@@ -156,6 +156,7 @@ def upsert_job(job: dict[str, Any]) -> None:
     job.setdefault("email_message", "")
     job.setdefault("panel_names", {})
     job.setdefault("dashboard_names", {})
+    job.setdefault("variable_overrides", {})
     job.setdefault("time_range", {"from": "now-24h", "to": "now"})
     # "" (not None) so older callers/tests that don't pass created_by still
     # get a string back from get("created_by", "") rather than needing a
@@ -266,5 +267,16 @@ def update_job_run_status(job_id: str, last_run: str, last_status: str) -> None:
             if job.get("id") == job_id:
                 job["last_run"] = last_run
                 job["last_status"] = last_status
+                break
+        save(config)
+
+
+def update_job_log_file(job_id: str, log_file: str) -> None:
+    """Record the path to a job's most recent per-run structured log file."""
+    with LOCK:
+        config = load()
+        for job in config.get("jobs", []):
+            if job.get("id") == job_id:
+                job["last_log_file"] = log_file
                 break
         save(config)

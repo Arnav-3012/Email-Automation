@@ -144,7 +144,7 @@ def _get_chrome_driver():
     opts.add_argument("--force-device-scale-factor=1")
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_page_load_timeout(90)
+    driver.set_page_load_timeout(120)
     driver.implicitly_wait(10)
     return driver
 
@@ -170,7 +170,7 @@ def _get_edge_driver():
         driver = webdriver.Edge(service=service, options=opts)
     except Exception:
         driver = webdriver.Edge(options=opts)
-    driver.set_page_load_timeout(90)
+    driver.set_page_load_timeout(120)
     driver.implicitly_wait(10)
     return driver
 
@@ -216,12 +216,13 @@ def _is_still_logged_in(driver) -> bool:
         return True
 
 
-def _wait_for_panel_render(driver, timeout: int = 60) -> None:
+def _wait_for_panel_render(driver, timeout: int = 60, extra_buffer: int = 60) -> None:
     """Wait for a Grafana panel/dashboard to finish loading data.
 
     Runs several best-effort strategies in sequence (each individually
     tolerant of failure/timeout), then applies a fixed buffer since Grafana
-    panels have been observed to take 10-20s to fully render.
+    panels have been observed to take longer to fully render with longer
+    time ranges (1 year+ can take up to 60s).
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -264,8 +265,9 @@ def _wait_for_panel_render(driver, timeout: int = 60) -> None:
     except Exception:
         pass
 
-    # Fixed buffer - dashboard panels take 10-20s; 25s covers render + animations.
-    time.sleep(25)
+    # Fixed buffer - dashboard panels take 10-20s normally, longer for wide
+    # time ranges; extra_buffer covers render + animations.
+    time.sleep(extra_buffer)
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +422,7 @@ def capture_full_dashboard(
         _dbg(f"Dashboard URL: {url}")
         driver.set_window_size(1920, 1080)
         driver.get(url)
-        _wait_for_panel_render(driver, timeout=90)
-        time.sleep(10)  # full dashboard has more panels, extra render buffer
+        _wait_for_panel_render(driver, timeout=90, extra_buffer=60)  # full dashboard has more panels, extra render buffer
 
         # Scroll through the page so every panel (including lazy-loaded ones) renders
         viewport_h: int = driver.execute_script("return window.innerHeight")

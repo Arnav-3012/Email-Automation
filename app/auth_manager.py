@@ -299,14 +299,29 @@ def require_auth(page_title: str, page_icon: str = "📈", layout: str = "wide")
     On success, also renders the standard logout sidebar before returning.
     """
     if not st.session_state.get("authenticated", False):
-        st.set_page_config(page_title="Login Required", page_icon="🔒", layout="centered")
-        st.title("🔒 Login Required")
-        st.warning("Please log in from the home page to continue.")
+        # A page refresh re-executes only this page's script (not main.py),
+        # so a valid session token must be honoured here too, or logins
+        # would only survive a refresh while sitting on the home page.
         try:
-            st.page_link("main.py", label="Go to Login", icon="🔐")
+            from app.session_manager import validate_session
+
+            _token = st.query_params.get("session", "")
+            _username = validate_session(_token) if _token else None
         except Exception:
-            st.caption("Use the sidebar to navigate to the home page.")
-        st.stop()
+            _username = None
+
+        if _username:
+            st.session_state.authenticated = True
+            st.session_state.current_user = _username
+        else:
+            st.set_page_config(page_title="Login Required", page_icon="🔒", layout="centered")
+            st.title("🔒 Login Required")
+            st.warning("Please log in from the home page to continue.")
+            try:
+                st.page_link("main.py", label="Go to Login", icon="🔐")
+            except Exception:
+                st.caption("Use the sidebar to navigate to the home page.")
+            st.stop()
 
     st.set_page_config(page_title=page_title, page_icon=page_icon, layout=layout)
     render_user_sidebar()
@@ -318,6 +333,15 @@ def render_user_sidebar() -> None:
     st.sidebar.markdown("---")
     if st.sidebar.button("🚪 Logout", use_container_width=True, key="_auth_logout_btn"):
         log_event("logout", username)
+        try:
+            from app.session_manager import delete_session
+
+            _token = st.query_params.get("session", "")
+            if _token:
+                delete_session(_token)
+            st.query_params.clear()
+        except Exception:
+            pass
         st.session_state.authenticated = False
         st.session_state.current_user = None
         st.rerun()

@@ -3,13 +3,15 @@ config.json
 contacts.json
 app_users.json
 audit_log.json
+sessions.json
 CLAUDE.md
 
 # Generated output
 output/
 
-# Project assets (company logo, branding images)
-assets/
+# Project assets (company logo, branding images) — keep the folder and
+# README tracked, but never commit the actual logo file.
+assets/company_logo.png
 
 # Python
 __pycache__/
