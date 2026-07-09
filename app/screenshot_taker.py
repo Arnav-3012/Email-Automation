@@ -27,6 +27,12 @@ def _dbg(msg: str) -> None:
         print(f"[DEBUG] {msg}", flush=True)
 
 
+def _warn(msg: str) -> None:
+    """Print/log a warning regardless of debug mode — for conditions the operator should always see."""
+    logger.warning(msg)
+    print(f"[WARN] [screenshot_taker] {msg}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Placeholder image
 # ---------------------------------------------------------------------------
@@ -128,9 +134,19 @@ def _get_chrome_driver():
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--no-xshm")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--ignore-certificate-errors")
+        opts.add_argument("--ignore-ssl-errors")
     opts.add_argument("--disable-extensions")
+    opts.add_argument("--disable-infobars")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--force-device-scale-factor=1")
     service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=opts)
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_page_load_timeout(90)
+    driver.implicitly_wait(10)
+    return driver
 
 
 def _get_edge_driver():
@@ -151,17 +167,23 @@ def _get_edge_driver():
         from selenium.webdriver.edge.service import Service
         from webdriver_manager.microsoft import EdgeChromiumDriverManager
         service = Service(EdgeChromiumDriverManager().install())
-        return webdriver.Edge(service=service, options=opts)
+        driver = webdriver.Edge(service=service, options=opts)
     except Exception:
-        return webdriver.Edge(options=opts)
+        driver = webdriver.Edge(options=opts)
+    driver.set_page_load_timeout(90)
+    driver.implicitly_wait(10)
+    return driver
 
 
 # ---------------------------------------------------------------------------
 # Login
 # ---------------------------------------------------------------------------
 
-def _login(driver, base_url: str, username: str, password: str) -> None:
-    """Log in to Grafana via the /login page."""
+def _login(driver, base_url: str, username: str, password: str) -> bool:
+    """Log in to Grafana via the /login page.
+
+    Returns True if login appears to have succeeded, False otherwise.
+    """
     driver.get(f"{base_url}/login")
     time.sleep(3)
     try:
@@ -169,29 +191,140 @@ def _login(driver, base_url: str, username: str, password: str) -> None:
         driver.find_element(By.NAME, "user").send_keys(username)
         driver.find_element(By.NAME, "password").send_keys(password)
         driver.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
-        time.sleep(3)
+        time.sleep(5)
+
+        current_url = driver.current_url
+        if "login" in current_url.lower():
+            _warn(
+                "Grafana login failed - still on login page after submit. "
+                "Check credentials in Settings."
+            )
+            return False
+
+        _dbg(f"Grafana login successful, redirected to: {current_url}")
+        return True
     except Exception as e:
-        print(f"[screenshot_taker] Login error: {e}", flush=True)
+        _warn(f"Grafana login error: {e}")
+        return False
+
+
+def _is_still_logged_in(driver) -> bool:
+    """Check whether the Grafana session is still active (i.e. not sitting on /login)."""
+    try:
+        return "login" not in driver.current_url.lower()
+    except Exception:
+        return True
+
+
+def _wait_for_panel_render(driver, timeout: int = 60) -> None:
+    """Wait for a Grafana panel/dashboard to finish loading data.
+
+    Runs several best-effort strategies in sequence (each individually
+    tolerant of failure/timeout), then applies a fixed buffer since Grafana
+    panels have been observed to take 10-20s to fully render.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    try:
+        WebDriverWait(driver, min(30, timeout)).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver, min(30, timeout)).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "[class*='panel-content'], div.react-grid-layout, [class*='dashboard-container']",
+            ))
+        )
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver, timeout).until_not(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "[class*='panel-loading'], [class*='loadingIndicator'], div.panel-loading",
+            ))
+        )
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver, min(30, timeout)).until(
+            lambda d: d.execute_script(
+                "return window.performance.getEntriesByType('resource')"
+                ".filter(r => r.responseEnd === 0).length === 0"
+            )
+        )
+    except Exception:
+        pass
+
+    # Fixed buffer - dashboard panels take 10-20s; 25s covers render + animations.
+    time.sleep(25)
+
+
+# ---------------------------------------------------------------------------
+# URL construction
+# ---------------------------------------------------------------------------
+
+def _build_panel_url(
+    base_url: str, dashboard_uid: str, panel_id: int, org_id: int,
+    from_time: str, to_time: str, variables: dict = None,
+) -> str:
+    """Build a /d-solo panel screenshot URL including time range and template variables.
+
+    Safe no-op for the variables part if `variables` is None/empty — matches
+    the previous URL shape exactly for dashboards without template variables.
+    """
+    url = (
+        f"{base_url}/d-solo/{dashboard_uid}"
+        f"?orgId={org_id}&panelId={panel_id}&kiosk&theme=light&from={from_time}&to={to_time}"
+    )
+    if variables:
+        for var_name, var_value in variables.items():
+            url += f"&var-{var_name}={var_value}"
+    return url
+
+
+def _build_dashboard_url(
+    base_url: str, dashboard_uid: str, org_id: int,
+    from_time: str, to_time: str, variables: dict = None,
+) -> str:
+    """Build a /d full-dashboard screenshot URL including time range and template variables."""
+    url = (
+        f"{base_url}/d/{dashboard_uid}"
+        f"?orgId={org_id}&kiosk=tv&theme=light&from={from_time}&to={to_time}"
+    )
+    if variables:
+        for var_name, var_value in variables.items():
+            url += f"&var-{var_name}={var_value}"
+    return url
 
 
 # ---------------------------------------------------------------------------
 # Screenshot helpers
 # ---------------------------------------------------------------------------
 
-def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1) -> list[bytes]:
+def _selenium_screenshot(
+    driver, base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1,
+    from_time: str = "now-24h", to_time: str = "now", variables: dict = None,
+) -> list[bytes]:
     """Navigate to the panel URL and return PNG chunks as a list of bytes.
 
     Resizes the window to the full page height so tall panels are captured
     completely. Returns a list with one element for panels up to 2000 px tall,
     or multiple 2000-px chunks for taller panels.
     """
-    url = (
-        f"{base_url}/d-solo/{dashboard_uid}"
-        f"?orgId={org_id}&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
-    )
+    url = _build_panel_url(base_url, dashboard_uid, panel_id, org_id, from_time, to_time, variables)
+    _dbg(f"Panel URL: {url}")
     driver.set_window_size(1280, 800)
     driver.get(url)
-    time.sleep(5)
+    _wait_for_panel_render(driver)
 
     # Expand window to full content size so nothing is clipped
     total_height = driver.execute_script("return document.body.scrollHeight")
@@ -219,14 +352,15 @@ def _selenium_screenshot(driver, base_url: str, dashboard_uid: str, panel_id: in
     return [_trim_whitespace(chunk, aggressive=True, min_padding=5) for chunk in chunks]
 
 
-def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1) -> list[bytes]:
+def _mss_screenshot(
+    base_url: str, dashboard_uid: str, panel_id: int, org_id: int = 1,
+    from_time: str = "now-24h", to_time: str = "now", variables: dict = None,
+) -> list[bytes]:
     """Open the panel URL in the default browser and capture the full screen with mss."""
     import mss
 
-    url = (
-        f"{base_url}/d-solo/{dashboard_uid}"
-        f"?orgId={org_id}&panelId={panel_id}&kiosk&theme=light&from=now-6h&to=now"
-    )
+    url = _build_panel_url(base_url, dashboard_uid, panel_id, org_id, from_time, to_time, variables)
+    _dbg(f"Panel URL: {url}")
     subprocess.Popen(["cmd", "/c", "start", url])
     time.sleep(8)
     with mss.mss() as sct:
@@ -246,7 +380,10 @@ def _mss_screenshot(base_url: str, dashboard_uid: str, panel_id: int, org_id: in
 # Public API
 # ---------------------------------------------------------------------------
 
-def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
+def capture_full_dashboard(
+    dashboard_uid: str, grafana_settings: dict,
+    from_time: str = "now-24h", to_time: str = "now", variables: dict = None,
+) -> bytes:
     """Capture a full-height screenshot of a Grafana dashboard in kiosk mode.
 
     Scrolls through the page first so lazy-loaded panels render, then expands
@@ -257,25 +394,34 @@ def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
     password = grafana_settings.get("password", "")
 
     driver = None
+    login_ok = False
     try:
         driver = _get_chrome_driver()
-        _login(driver, base_url, username, password)
+        login_ok = _login(driver, base_url, username, password)
     except Exception:
         try:
             if driver:
                 driver.quit()
             driver = _get_edge_driver()
-            _login(driver, base_url, username, password)
+            login_ok = _login(driver, base_url, username, password)
         except Exception as e:
             print(f"[screenshot_taker] Full dashboard capture failed: {e}", flush=True)
             return _unavailable_png_bytes()
 
+    if not login_ok:
+        _warn(
+            "Grafana login failed for full dashboard capture - screenshot may "
+            "show no data or the login page. Verify Grafana credentials in Settings."
+        )
+
     try:
         org_id = grafana_settings.get("org_id", 1)
-        url = f"{base_url}/d/{dashboard_uid}?orgId={org_id}&kiosk&theme=light&from=now-6h&to=now"
+        url = _build_dashboard_url(base_url, dashboard_uid, org_id, from_time, to_time, variables)
+        _dbg(f"Dashboard URL: {url}")
         driver.set_window_size(1920, 1080)
         driver.get(url)
-        time.sleep(5)  # wait for initial panel render
+        _wait_for_panel_render(driver, timeout=90)
+        time.sleep(10)  # full dashboard has more panels, extra render buffer
 
         # Scroll through the page so every panel (including lazy-loaded ones) renders
         viewport_h: int = driver.execute_script("return window.innerHeight")
@@ -311,7 +457,10 @@ def capture_full_dashboard(dashboard_uid: str, grafana_settings: dict) -> bytes:
             pass
 
 
-def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) -> dict[int, list[bytes]]:
+def capture_panels(
+    dashboard_uid: str, panel_ids: list, grafana_settings: dict,
+    from_time: str = "now-24h", to_time: str = "now", variables: dict = None,
+) -> dict[int, list[bytes]]:
     """Screenshot every panel, trying Chrome → Edge → mss in order.
 
     Returns a panel_id → list[bytes] dict. Each list contains one PNG per
@@ -326,15 +475,17 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
     results: dict[int, list[bytes]] = {}
     driver = None
     method: str | None = None
+    login_ok = False
 
     _dbg(f"capture_panels: OS detected={platform.system()} (IS_LINUX={IS_LINUX})")
+    _dbg(f"capture_panels: variables={variables or {}}")
 
     # Level 1 — Chrome Selenium
     try:
         print("[screenshot_taker] Trying Chrome Selenium...", flush=True)
         _dbg(f"capture_panels: attempting Chrome Selenium for dashboard={dashboard_uid} panels={panel_ids} org_id={org_id}")
         driver = _get_chrome_driver()
-        _login(driver, base_url, username, password)
+        login_ok = _login(driver, base_url, username, password)
         method = "Chrome"
         print("[screenshot_taker] Chrome Selenium OK", flush=True)
         _dbg("capture_panels: Chrome Selenium driver ready")
@@ -349,7 +500,7 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
             print("[screenshot_taker] Trying Edge Selenium...", flush=True)
             _dbg("capture_panels: attempting Edge Selenium")
             driver = _get_edge_driver()
-            _login(driver, base_url, username, password)
+            login_ok = _login(driver, base_url, username, password)
             method = "Edge"
             print("[screenshot_taker] Edge Selenium OK", flush=True)
             _dbg("capture_panels: Edge Selenium driver ready")
@@ -360,18 +511,37 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
 
     # Selenium path (Chrome or Edge)
     if driver is not None:
+        if not login_ok:
+            _warn(
+                f"Grafana login failed via {method} - panel screenshots may show "
+                "no data or the login page. Verify Grafana credentials in Settings."
+            )
         try:
             for panel_id in panel_ids:
-                try:
-                    _dbg(f"capture_panels: screenshotting panel_id={panel_id} via {method}")
-                    chunks = _selenium_screenshot(driver, base_url, dashboard_uid, panel_id, org_id)
-                    results[panel_id] = chunks
-                    print(f"[screenshot_taker] Panel {panel_id} captured via {method} ({len(chunks)} chunk(s))", flush=True)
-                    _dbg(f"capture_panels: panel_id={panel_id} OK — {len(chunks)} chunk(s)")
-                except Exception as e:
-                    print(f"[screenshot_taker] Panel {panel_id} failed: {e}", flush=True)
-                    _dbg(f"capture_panels: panel_id={panel_id} failed via {method}: {e} — using placeholder")
-                    results[panel_id] = _unavailable_png()
+                if not _is_still_logged_in(driver):
+                    _warn(f"Grafana session lost mid-job before panel {panel_id}, re-logging in")
+                    login_ok = _login(driver, base_url, username, password)
+                    if not login_ok:
+                        _warn(f"Re-login failed before panel {panel_id}")
+
+                for attempt in range(2):
+                    try:
+                        _dbg(f"capture_panels: screenshotting panel_id={panel_id} via {method} (attempt {attempt + 1})")
+                        chunks = _selenium_screenshot(
+                            driver, base_url, dashboard_uid, panel_id, org_id, from_time, to_time, variables
+                        )
+                        results[panel_id] = chunks
+                        print(f"[screenshot_taker] Panel {panel_id} captured via {method} ({len(chunks)} chunk(s))", flush=True)
+                        _dbg(f"capture_panels: panel_id={panel_id} OK — {len(chunks)} chunk(s)")
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            _warn(f"Panel {panel_id} attempt 1 failed via {method}: {e}. Retrying...")
+                            time.sleep(5)
+                        else:
+                            print(f"[screenshot_taker] Panel {panel_id} failed: {e}", flush=True)
+                            _dbg(f"capture_panels: panel_id={panel_id} failed via {method}: {e} — using placeholder")
+                            results[panel_id] = _unavailable_png()
         finally:
             try:
                 driver.quit()
@@ -384,16 +554,22 @@ def capture_panels(dashboard_uid: str, panel_ids: list, grafana_settings: dict) 
         print("[screenshot_taker] Selenium blocked, trying mss screen capture...", flush=True)
         _dbg("capture_panels: falling back to mss screen capture (Selenium unavailable)")
         for panel_id in panel_ids:
-            try:
-                _dbg(f"capture_panels: mss capturing panel_id={panel_id}")
-                chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id)
-                results[panel_id] = chunks
-                print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
-                _dbg(f"capture_panels: panel_id={panel_id} OK via mss")
-            except Exception as e:
-                print(f"[screenshot_taker] Panel {panel_id} mss failed: {e}", flush=True)
-                _dbg(f"capture_panels: panel_id={panel_id} mss failed: {e} — using placeholder")
-                results[panel_id] = _unavailable_png()
+            for attempt in range(2):
+                try:
+                    _dbg(f"capture_panels: mss capturing panel_id={panel_id} (attempt {attempt + 1})")
+                    chunks = _mss_screenshot(base_url, dashboard_uid, panel_id, org_id, from_time, to_time, variables)
+                    results[panel_id] = chunks
+                    print(f"[screenshot_taker] Panel {panel_id} captured via mss", flush=True)
+                    _dbg(f"capture_panels: panel_id={panel_id} OK via mss")
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        _warn(f"Panel {panel_id} mss attempt 1 failed: {e}. Retrying...")
+                        time.sleep(5)
+                    else:
+                        print(f"[screenshot_taker] Panel {panel_id} mss failed: {e}", flush=True)
+                        _dbg(f"capture_panels: panel_id={panel_id} mss failed: {e} — using placeholder")
+                        results[panel_id] = _unavailable_png()
     else:
         print("[screenshot_taker] Selenium blocked and running on Linux — mss not available on headless Linux, Chrome headless is required", flush=True)
         _dbg("capture_panels: mss not available on headless Linux, Chrome headless is required")

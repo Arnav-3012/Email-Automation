@@ -156,6 +156,7 @@ def upsert_job(job: dict[str, Any]) -> None:
     job.setdefault("email_message", "")
     job.setdefault("panel_names", {})
     job.setdefault("dashboard_names", {})
+    job.setdefault("time_range", {"from": "now-24h", "to": "now"})
     # "" (not None) so older callers/tests that don't pass created_by still
     # get a string back from get("created_by", "") rather than needing a
     # None-check everywhere ownership is compared.

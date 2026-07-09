@@ -59,6 +59,17 @@ def run_job(job_id: str) -> None:
         return
 
     _log(f"Starting job: {job['name']}")
+
+    config_manager.update_job_run_status(
+        job_id,
+        last_run=datetime.now().isoformat(timespec="seconds"),
+        last_status="running",
+    )
+
+    time_range = job.get("time_range", {})
+    from_time = time_range.get("from", "now-24h")
+    to_time = time_range.get("to", "now")
+
     grafana_settings = config_manager.get_grafana_settings()
 
     # Always use the job creator's Grafana credentials (with fallback to global).
@@ -108,10 +119,21 @@ def run_job(job_id: str) -> None:
             chart_panels = [p for p in selected if p.get("type") not in TABLE_TYPES]
             table_panels = [p for p in selected if p.get("type") in TABLE_TYPES]
 
+            # Template variable values for this dashboard — safe no-op ({}) if none exist
+            try:
+                variables = grafana_client.get_dashboard_variables(uid, credentials=credentials)
+                if variables:
+                    _log(f"Dashboard {uid} variables: {variables}")
+                else:
+                    _log(f"Dashboard {uid} has no template variables")
+            except Exception as e:
+                variables = {}
+                _log(f"Variable fetch failed for {uid} (continuing without): {e}")
+
             # Full dashboard overview screenshot
             try:
                 dashboard_screenshots[uid] = screenshot_taker.capture_full_dashboard(
-                    uid, grafana_settings_with_creds
+                    uid, grafana_settings_with_creds, from_time=from_time, to_time=to_time, variables=variables
                 )
                 _log(f"Full dashboard captured: {dashboard.get('title', uid)}")
             except Exception as e:
@@ -121,7 +143,10 @@ def run_job(job_id: str) -> None:
             # Screenshots for chart panels
             if chart_panels:
                 chart_ids = [p["id"] for p in chart_panels]
-                screenshots = screenshot_taker.capture_panels(uid, chart_ids, grafana_settings_with_creds)
+                screenshots = screenshot_taker.capture_panels(
+                    uid, chart_ids, grafana_settings_with_creds,
+                    from_time=from_time, to_time=to_time, variables=variables,
+                )
                 for panel in chart_panels:
                     panel_title = _resolve_title(
                         panel_names, f"{uid}_{panel['id']}",
@@ -139,7 +164,10 @@ def run_job(job_id: str) -> None:
             # Screenshots for table panels — added to PDF alongside chart panels
             if table_panels:
                 table_ids = [p["id"] for p in table_panels]
-                table_screenshots = screenshot_taker.capture_panels(uid, table_ids, grafana_settings_with_creds)
+                table_screenshots = screenshot_taker.capture_panels(
+                    uid, table_ids, grafana_settings_with_creds,
+                    from_time=from_time, to_time=to_time, variables=variables,
+                )
                 for panel in table_panels:
                     panel_title = _resolve_title(
                         panel_names, f"{uid}_{panel['id']}",

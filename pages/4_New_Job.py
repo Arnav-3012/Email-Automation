@@ -100,6 +100,33 @@ with st.container(border=True):
     pdf_title = st.text_input("PDF Title", value=_existing_job.get("pdf_title", ""))
     st.caption("Use {date} for today's date — e.g. Finance Summary – {date}")
 
+    time_range_options = {
+        "Last 1 hour":   {"from": "now-1h",  "to": "now"},
+        "Last 6 hours":  {"from": "now-6h",  "to": "now"},
+        "Last 24 hours": {"from": "now-24h", "to": "now"},
+        "Last 7 days":   {"from": "now-7d",  "to": "now"},
+        "Last 30 days":  {"from": "now-30d", "to": "now"},
+        "Today":         {"from": "now/d",   "to": "now"},
+        "This week":     {"from": "now/w",   "to": "now"},
+        "This month":    {"from": "now/M",   "to": "now"},
+    }
+
+    _saved_range = _existing_job.get("time_range", {"from": "now-24h", "to": "now"})
+    _saved_range_label = next(
+        (k for k, v in time_range_options.items() if v == _saved_range),
+        "Last 24 hours",
+    )
+
+    selected_range_label = st.selectbox(
+        "Time Range",
+        options=list(time_range_options.keys()),
+        index=list(time_range_options.keys()).index(_saved_range_label),
+        help=(
+            "Grafana data time range for this report. "
+            "Match this to where your dashboard data lives."
+        ),
+    )
+
 # ---------------------------------------------------------------------------
 # Schedule
 # ---------------------------------------------------------------------------
@@ -162,6 +189,17 @@ with st.container(border=True):
             with st.container(border=True):
                 st.markdown(f"**📊 {entry['title']}**")
                 st.caption(f"📁 {entry.get('folder_path', '')} · {n} panel{'s' if n != 1 else ''} selected")
+
+                try:
+                    _vars_detected = grafana_client.get_dashboard_variables(dash_uid, credentials=_creds)
+                    if _vars_detected:
+                        st.info(
+                            f"📊 This dashboard has template variables: "
+                            f"{', '.join(_vars_detected.keys())}. "
+                            f"Current Grafana values will be used automatically in screenshots."
+                        )
+                except Exception:
+                    pass
 
                 dash_name_key = f"dash_display_name_{dash_uid}"
                 st.session_state.setdefault(
@@ -295,6 +333,7 @@ if st.button(save_label, type="primary", use_container_width=True):
                 for d in draft_dashboards
             ],
             "recipient_ids": [c["id"] for c in selected_contacts],
+            "time_range": time_range_options[selected_range_label],
             "schedule": {
                 "frequency": frequency,
                 "time": schedule_time.strftime("%H:%M"),

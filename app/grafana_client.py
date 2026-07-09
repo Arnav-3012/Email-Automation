@@ -437,3 +437,48 @@ def get_panel_title(dashboard_uid: str, panel_id: int, credentials: dict = None)
     panels = get_panels(get_dashboard(dashboard_uid, credentials=credentials))
     panel = next((p for p in panels if p["id"] == panel_id), None)
     return panel["title"] if panel else f"Panel {panel_id}"
+
+
+def get_dashboard_variables(dashboard_uid: str, credentials: dict = None) -> dict:
+    """Extract current template variable values from dashboard JSON for use in screenshot URLs.
+
+    Works for dashboards with variables (returns a populated dict) and without
+    (returns {} safely). Never raises — a variable-fetch problem should never
+    block a screenshot, so any error also returns {}.
+
+    Returns: {var_name: var_value}, e.g. {"region": "us-east", "server": "prod"}.
+    Multi-value variables are joined with "|". "All"/$__all selections and
+    datasource/interval variables are skipped (not meaningful as URL params).
+    """
+    try:
+        dashboard_json = get_dashboard(dashboard_uid, credentials=credentials)
+        templating = dashboard_json.get("dashboard", {}).get("templating", {}).get("list", [])
+
+        variables = {}
+        for var in templating:
+            var_name = var.get("name", "")
+            var_type = var.get("type", "")
+            current = var.get("current", {})
+
+            if var_type in ("datasource", "interval"):
+                continue
+
+            value = current.get("value", "")
+
+            if isinstance(value, list):
+                filtered = [str(v) for v in value if v != "$__all" and v != "All"]
+                if filtered:
+                    value = "|".join(filtered)
+                else:
+                    continue
+
+            if not value or value == "$__all" or value == "All":
+                continue
+
+            if var_name:
+                variables[var_name] = str(value)
+
+        return variables
+    except Exception as e:
+        _warn(f"Could not fetch template variables for {dashboard_uid}: {e}")
+        return {}
