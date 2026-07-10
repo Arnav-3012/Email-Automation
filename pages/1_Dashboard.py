@@ -239,6 +239,7 @@ else:
                                  use_container_width=True, type="primary",
                                  disabled=run_blocked, help=run_tip):
                         if can_manage and not is_orphaned:
+                            st.session_state[f"run_last_run_before_{job_id}"] = job.get("last_run")
                             threading.Thread(
                                 target=runner.run_job,
                                 args=(job_id,),
@@ -246,7 +247,6 @@ else:
                             ).start()
                             st.session_state[f"running_{job_id}"] = True
                             st.session_state[f"run_poll_count_{job_id}"] = 0
-                            st.session_state[f"run_last_run_before_{job_id}"] = job.get("last_run")
                             st.toast("Job started.")
                             st.rerun()
 

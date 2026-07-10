@@ -263,15 +263,23 @@ def run_job(job_id: str) -> None:
                             "dashboard_json": dashboard_json,
                             "df": df,
                         })
+                    else:
+                        # Query ran and returned 0 rows — real for this panel,
+                        # but log it so it isn't mistaken for a pipeline bug.
+                        _log(f"Table panel '{panel['title']}': query returned 0 rows, no CSV to build")
+                        _log_event("warning", f"Table panel '{panel['title']}': query returned 0 rows, no CSV to build")
                 except ValueError as e:
-                    # Unsupported datasource — screenshot already captured above
-                    _log(f"Table panel '{panel['title']}': datasource not supported for CSV, screenshot included in PDF")
-                    _log_event("warning", f"Table panel '{panel['title']}': datasource not supported for CSV")
+                    # Either "no SQL query found" (unsupported datasource) or a
+                    # Grafana-side query error surfaced by data_fetcher — the
+                    # exception text tells us which. Screenshot already captured above.
+                    _log(f"Table panel '{panel['title']}': {e}")
+                    _log_event("warning", f"Table panel '{panel['title']}': {e}")
                 except Exception as e:
                     _log(f"Table panel {panel['title']} failed: {e}")
                     _log_event("warning", f"Table panel '{panel['title']}' data fetch failed: {e}")
 
         _log(f"Screenshots captured: {len(panels_data)} panel(s) for PDF, {len(table_panels_data)} table panel(s) for CSV")
+        _log_event("info", f"{len(table_panels_data)} table panel(s) queued for CSV export")
 
         # Build PDF (chart panels + table panel screenshots)
         if panels_data:
@@ -415,6 +423,7 @@ def run_job(job_id: str) -> None:
 
                 attachments.append(csv_path)
                 _log(f"CSV built: {item['panel']['title']} -> {csv_path}")
+                _log_event("info", f"CSV built: {item['panel']['title']} ({Path(csv_path).name})")
 
         # Send email with all attachments
         custom_subject = job.get("email_subject", "").strip()
@@ -423,6 +432,8 @@ def run_job(job_id: str) -> None:
             else job["name"] + " – " + date.today().strftime("%d %b %Y")
         )
         custom_message = job.get("email_message", "")
+        _log(f"Sending email with {len(attachments)} attachment(s): {attachments}")
+        _log_event("info", f"Sending email with {len(attachments)} attachment(s)")
         mailer.send(recipients, subject, attachments, custom_message)
         _log(f"Email sent to {len(recipients)} recipient(s)")
         _log_event("info", f"Email sent to {len(recipients)} recipient(s)")

@@ -102,13 +102,20 @@ def _post(path: str, payload: dict, credentials: dict = None) -> any:
     _dbg(f"POST {url}")
     try:
         resp = session.post(url, json=payload, timeout=30)
-        _dbg(f"POST {url} → status={resp.status_code}")
+        _dbg(f"POST {url} -> status={resp.status_code}")
+        if resp.status_code == 400:
+            _warn(
+                f"HTTP 400 from {path}. Request body: {payload}. "
+                f"Response: {resp.text[:500]}"
+            )
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError as e:
         raise GrafanaConnectionError(f"Cannot reach Grafana at {base_url}: {e}")
     except requests.exceptions.HTTPError as e:
-        raise GrafanaConnectionError(f"HTTP {resp.status_code} from {path}: {e}")
+        raise GrafanaConnectionError(
+            f"HTTP {resp.status_code} from {path}: {e} — response body: {resp.text[:500]}"
+        )
     except Exception as e:
         raise GrafanaConnectionError(f"Request failed: {e}")
 

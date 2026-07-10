@@ -120,7 +120,11 @@ def _fetch_sql(
 ) -> pd.DataFrame:
     """Fetch data from SQL datasource (MySQL, PostgreSQL etc)."""
     targets = panel_meta.get("targets", [])
-    queries = _build_queries(targets, panel_meta.get("datasource_uid", ""))
+    queries = _build_queries(
+        targets,
+        panel_meta.get("datasource_uid", ""),
+        panel_meta.get("datasource_type", ""),
+    )
 
     if not queries:
         raise ValueError(
@@ -139,16 +143,60 @@ def _fetch_sql(
         response = grafana_client.execute_ds_query(payload, credentials=credentials)
         result = _parse_response(response, queries)
         _dbg(f"_fetch_sql: got DataFrame shape={result.shape}")
+        if result.empty:
+            # 200 OK but no frames — either Grafana rejected the query per-refId
+            # (error embedded in the results object, not the HTTP status) or the
+            # query genuinely returned zero rows. Surface whichever it is instead
+            # of silently returning empty, so the caller can log the real cause.
+            per_ref_errors = _extract_result_errors(response, queries)
+            if per_ref_errors:
+                raise ValueError(
+                    f"Grafana query error for panel '{panel_meta.get('title')}': "
+                    f"{'; '.join(per_ref_errors)}"
+                )
+            _dbg(f"_fetch_sql: query executed but returned 0 rows. Raw response: {response}")
+            print(
+                f"[data_fetcher] Panel '{panel_meta.get('title')}' query returned 0 rows. "
+                f"Raw response: {response}"
+            )
         return result
+    except GrafanaConnectionError as e:
+        # Re-raise so runner.py logs the real Grafana error (e.g. HTTP 400
+        # with response body) instead of silently treating this as "no data".
+        raise
+    except ValueError:
+        raise
     except Exception as e:
         _dbg(f"_fetch_sql: failed: {e}")
         print(f"[data_fetcher] SQL fetch failed: {e}")
         return pd.DataFrame()
 
 
+def _extract_result_errors(
+    response: dict[str, Any],
+    queries: list[dict[str, Any]],
+) -> list[str]:
+    """Pull per-refId error messages out of a 200 OK /api/ds/query response.
+
+    Grafana can return HTTP 200 with an error embedded in results[refId].error
+    (e.g. bad SQL syntax caught by the plugin, not the HTTP layer). These never
+    raise HTTPError, so they'd otherwise look identical to "zero rows".
+    """
+    results = response.get("results", {})
+    errors = []
+    for query in queries:
+        ref_id = query["refId"]
+        ref_result = results.get(ref_id, {})
+        err = ref_result.get("error") or ref_result.get("errorSource")
+        if err:
+            errors.append(f"[{ref_id}] {err}")
+    return errors
+
+
 def _build_queries(
     targets: list[dict[str, Any]],
     datasource_uid: str,
+    datasource_type: str = "",
 ) -> list[dict[str, Any]]:
     """Build the queries list for the /api/ds/query payload from panel targets."""
     queries: list[dict[str, Any]] = []
@@ -160,16 +208,21 @@ def _build_queries(
             or target.get("query")
             or ""
         )
+        target_ds = target.get("datasource") or {}
         ds_uid = (
-            (target.get("datasource") or {}).get("uid")
+            target_ds.get("uid")
             or target.get("datasourceUid")
             or datasource_uid
             or ""
         )
+        ds_type = target_ds.get("type") or datasource_type or ""
         if not raw_sql or not ds_uid:
             continue
+        datasource: dict[str, Any] = {"uid": ds_uid}
+        if ds_type:
+            datasource["type"] = ds_type
         queries.append({
-            "datasource": {"uid": ds_uid},
+            "datasource": datasource,
             "rawSql": raw_sql,
             "format": "table",
             "refId": chr(65 + i),
