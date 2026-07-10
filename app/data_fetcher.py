@@ -159,6 +159,12 @@ def _fetch_sql(
                 f"[data_fetcher] Panel '{panel_meta.get('title')}' query returned 0 rows. "
                 f"Raw response: {response}"
             )
+            result.attrs["zero_row_diagnostic"] = (
+                f"Grafana returned HTTP 200 with 0 rows for refId(s) "
+                f"{[q['refId'] for q in queries]}. Raw results keys: "
+                f"{list(response.get('results', {}).keys())}. "
+                f"Query sent: {queries}"
+            )
         return result
     except GrafanaConnectionError as e:
         # Re-raise so runner.py logs the real Grafana error (e.g. HTTP 400

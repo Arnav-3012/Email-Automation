@@ -265,9 +265,12 @@ def run_job(job_id: str) -> None:
                         })
                     else:
                         # Query ran and returned 0 rows — real for this panel,
-                        # but log it so it isn't mistaken for a pipeline bug.
-                        _log(f"Table panel '{panel['title']}': query returned 0 rows, no CSV to build")
-                        _log_event("warning", f"Table panel '{panel['title']}': query returned 0 rows, no CSV to build")
+                        # but log it (with diagnostic detail) so it isn't mistaken
+                        # for a pipeline bug and the cause is visible without
+                        # terminal access.
+                        diagnostic = (df.attrs.get("zero_row_diagnostic") if df is not None else None) or "no diagnostic available"
+                        _log(f"Table panel '{panel['title']}': query returned 0 rows, no CSV to build. {diagnostic}")
+                        _log_event("warning", f"Table panel '{panel['title']}': query returned 0 rows. {diagnostic}")
                 except ValueError as e:
                     # Either "no SQL query found" (unsupported datasource) or a
                     # Grafana-side query error surfaced by data_fetcher — the
